@@ -672,6 +672,7 @@ pub fn main() -> Result<()> {
             bare,
             no_tags,
             ref_name,
+            revision,
             remote,
             shallow,
             directory,
@@ -682,6 +683,7 @@ pub fn main() -> Result<()> {
                 handshake_info,
                 no_tags,
                 ref_name,
+                revision,
                 shallow: shallow.into(),
             };
             prepare_and_run(
@@ -1849,6 +1851,38 @@ mod tests {
     fn clap() {
         use clap::CommandFactory;
         Args::command().debug_assert();
+    }
+
+    #[test]
+    #[cfg(feature = "gitoxide-core-blocking-client")]
+    fn clone_revision_is_distinct_from_ref() {
+        use clap::Parser;
+
+        let args = Args::try_parse_from(["gix", "clone", "--revision", "refs/heads/main", "example.com/repo"])
+            .expect("a full clone revision parses");
+        let Subcommands::Clone(crate::plumbing::options::clone::Platform { revision, .. }) = args.cmd else {
+            panic!("clone arguments route to clone")
+        };
+        assert_eq!(
+            revision.as_ref().map(|revision| revision.as_slice()),
+            Some(b"refs/heads/main".as_slice()),
+            "the revision reaches clone options"
+        );
+        assert_eq!(
+            Args::try_parse_from([
+                "gix",
+                "clone",
+                "--ref",
+                "main",
+                "--revision",
+                "refs/heads/main",
+                "example.com/repo",
+            ])
+            .expect_err("ref and revision select incompatible clone modes")
+            .kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "clap rejects both selectors together"
+        );
     }
 
     #[test]

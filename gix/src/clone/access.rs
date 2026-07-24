@@ -1,4 +1,8 @@
-use crate::{Repository, bstr::BString, clone::PrepareFetch};
+use crate::{
+    Repository,
+    bstr::{BString, ByteSlice},
+    clone::PrepareFetch,
+};
 
 /// Builder
 impl PrepareFetch {
@@ -58,6 +62,37 @@ impl PrepareFetch {
         Name: TryInto<&'a gix_ref::PartialNameRef, Error = E>,
     {
         self.ref_name = name.map(TryInto::try_into).transpose()?.map(ToOwned::to_owned);
+        if self.ref_name.is_some() {
+            self.revision = None;
+        }
+        Ok(self)
+    }
+
+    /// Fetch only `revision` and check it out with a detached `HEAD`.
+    ///
+    /// A revision is either `HEAD`, a full reference name like `refs/heads/main`, or a full object ID.
+    /// No local or remote-tracking references are created and no fetch refspec is persisted.
+    pub fn with_revision(
+        mut self,
+        revision: Option<impl Into<BString>>,
+    ) -> Result<Self, crate::clone::with_revision::Error> {
+        self.revision = revision
+            .map(|revision| {
+                let revision = revision.into();
+                let spec = gix_refspec::parse(revision.as_ref(), gix_refspec::parse::Operation::Fetch)?;
+                let source = spec.source().expect("one-sided non-empty fetch refspec");
+                let is_full_ref = source.starts_with(b"refs/") && source.find_byteset(b"*?[]\\").is_none();
+                let is_valid = revision.as_bstr() == source
+                    && spec.destination().is_none()
+                    && (source == "HEAD" || is_full_ref || gix_hash::ObjectId::from_hex(source).is_ok());
+                is_valid
+                    .then(|| spec.to_owned())
+                    .ok_or(crate::clone::with_revision::Error::Invalid { revision })
+            })
+            .transpose()?;
+        if self.revision.is_some() {
+            self.ref_name = None;
+        }
         Ok(self)
     }
 }
