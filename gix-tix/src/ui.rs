@@ -106,18 +106,8 @@ pub(crate) fn draw(
         })
         .collect();
     let graph_max_offset = max_lane_width.saturating_sub(align_width);
-    let metadata_max_offset = if align_metadata {
-        metadata
-            .iter()
-            .map(Line::width)
-            .max()
-            .unwrap_or_default()
-            .saturating_sub((content.width as usize).saturating_sub(align_width))
-    } else {
-        0
-    };
     let max_offset = if align_metadata {
-        graph_max_offset.saturating_add(metadata_max_offset)
+        graph_max_offset
     } else {
         lanes
             .iter()
@@ -130,7 +120,6 @@ pub(crate) fn draw(
     .min(u16::MAX as usize);
     let horizontal_offset = app.horizontal_offset.min(max_offset);
     let graph_offset = horizontal_offset.min(graph_max_offset);
-    let metadata_offset = horizontal_offset.saturating_sub(graph_max_offset);
 
     for (index, metadata) in metadata.into_iter().enumerate() {
         let lane = lanes.lane(index);
@@ -169,7 +158,7 @@ pub(crate) fn draw(
                 1,
             );
             frame.render_widget(Clear, aligned);
-            frame.render_widget(Paragraph::new(metadata).scroll((0, metadata_offset as u16)), aligned);
+            frame.render_widget(Paragraph::new(metadata), aligned);
         } else {
             let mut spans = Vec::with_capacity(metadata.spans.len() + 1);
             spans.push(Span::styled(lane, style));
@@ -189,7 +178,7 @@ pub(crate) fn draw(
         }
         if selected && app.show_selection_tail && body.width > 0 {
             let line_width = if align_metadata {
-                align_width.saturating_add(metadata_width.saturating_sub(metadata_offset))
+                align_width.saturating_add(metadata_width)
             } else {
                 lane.chars()
                     .count()
@@ -1427,9 +1416,14 @@ mod tests {
 
         app.update(Action::ScrollRight);
         terminal.draw(|frame| draw(frame, &mut app, &Decorations::new()))?;
+        assert_eq!(
+            terminal.backend().buffer()[(4, 0)].symbol(),
+            "0",
+            "l leaves aligned metadata fixed when there is no graph left to pan"
+        );
         assert!(
-            rendered_row(&terminal).contains("subject-tail"),
-            "l reveals clipped aligned metadata after graph panning is exhausted"
+            !rendered_row(&terminal).contains("subject-tail"),
+            "aligned metadata remains clipped instead of becoming horizontal-scroll content"
         );
         Ok(())
     }
