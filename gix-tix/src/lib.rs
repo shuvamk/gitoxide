@@ -215,6 +215,14 @@ fn history_needs_alternate_screen(screen: Screen, terminal_height: u16, commits:
     screen == Screen::Auto && inline_height(screen, terminal_height, commits).is_none()
 }
 
+fn needs_alternate_screen(
+    show_panel: bool,
+    history_requires_alternate_screen: bool,
+    current_inline_height: Option<u16>,
+) -> bool {
+    show_panel || history_requires_alternate_screen || current_inline_height.is_none()
+}
+
 fn resize_inline_screen(terminal: &mut ratatui::DefaultTerminal, height: u16) -> std::io::Result<()> {
     if terminal.get_frame().area().height == height {
         return Ok(());
@@ -243,11 +251,11 @@ fn sync_screen(
     inline_terminal: &mut Option<ratatui::DefaultTerminal>,
     enhanced_keyboard: bool,
 ) -> Result<()> {
-    let needs_alternate_screen = app.show_commit || history_requires_alternate_screen;
+    let inline_height = inline_height(screen, terminal::size()?.1, app.rows.len());
+    let needs_alternate_screen =
+        needs_alternate_screen(app.show_commit, history_requires_alternate_screen, inline_height);
     if !should_switch_screen(started_inline, needs_alternate_screen, inline_terminal.is_some()) {
-        if started_inline && app.inline && resize_inline {
-            let height = inline_height(screen, terminal::size()?.1, app.rows.len())
-                .expect("an inline history always has an inline height");
+        if let (true, Some(height)) = (started_inline && app.inline && resize_inline, inline_height) {
             resize_inline_screen(terminal, height).context("could not resize the inline history")?;
         }
         return Ok(());
@@ -259,9 +267,9 @@ fn sync_screen(
     } else if let Some(inline) = inline_terminal.take() {
         leave_alternate_screen(terminal, inline, enhanced_keyboard).context("could not leave the alternate screen")?;
         app.inline = true;
-        let height = inline_height(screen, terminal::size()?.1, app.rows.len())
-            .expect("an inline history always has an inline height");
-        resize_inline_screen(terminal, height).context("could not resize the inline history")?;
+        if let Some(height) = inline_height {
+            resize_inline_screen(terminal, height).context("could not resize the inline history")?;
+        }
     }
     Ok(())
 }
@@ -493,21 +501,7 @@ fn event_loop(
                 Effect::VerifySignatures(ids) => {
                     verification_receiver = Some(start_signature_verification(repository_path.clone(), ids));
                 }
-                Effect::Quit => {
-                    if app.inline {
-                        app.show_selection_tail = false;
-                        draw(
-                            terminal,
-                            &mut app,
-                            &decorations,
-                            &mailmap,
-                            &authors,
-                            &mut fill_repository,
-                            &mut commit_message,
-                        )?;
-                    }
-                    return Ok(None);
-                }
+                Effect::Quit => return Ok(None),
             }
         }
         sync_screen(
@@ -526,7 +520,25 @@ fn event_loop(
         .transpose();
     let outcome = result?;
     restore.context("could not restore the inline terminal")?;
+    if outcome.is_none() && started_inline {
+        prepare_inline_exit(&mut app);
+        draw(
+            terminal,
+            &mut app,
+            &decorations,
+            &mailmap,
+            &authors,
+            &mut fill_repository,
+            &mut commit_message,
+        )?;
+    }
     Ok(outcome)
+}
+
+fn prepare_inline_exit(app: &mut App) {
+    app.inline = true;
+    app.show_commit = false;
+    app.show_selection_tail = false;
 }
 
 fn start_lane_worker(rows: Vec<CommitRow>) -> mpsc::Receiver<(Vec<CommitRow>, app::Graph, Duration)> {
@@ -832,6 +844,14 @@ mod tests {
         assert!(!history_needs_alternate_screen(Screen::Auto, 20, 8));
         assert!(history_needs_alternate_screen(Screen::Auto, 20, 10));
         assert!(
+            needs_alternate_screen(false, false, None),
+            "current terminal geometry overrides a stale history-fit flag"
+        );
+        assert!(
+            !needs_alternate_screen(false, false, Some(11)),
+            "a fitting current layout may return to inline mode"
+        );
+        assert!(
             !history_needs_alternate_screen(Screen::Half, 20, usize::MAX),
             "half-screen mode never switches because history grows"
         );
@@ -956,6 +976,21 @@ mod tests {
             KeyEventKind::Repeat,
             Some(&Action::ToggleDate)
         ));
+    }
+
+    #[test]
+    fn prepares_a_reduced_selection_after_leaving_the_alternate_screen() {
+        let mut app = App::new(1);
+        app.show_commit = true;
+
+        prepare_inline_exit(&mut app);
+
+        assert!(app.inline, "the final frame is drawn into the restored inline screen");
+        assert!(
+            !app.show_commit,
+            "alternate-screen panels are omitted from the final frame"
+        );
+        assert!(!app.show_selection_tail, "only the left selection marker remains");
     }
 
     #[test]

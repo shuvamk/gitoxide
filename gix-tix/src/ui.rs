@@ -95,7 +95,7 @@ pub(crate) fn draw(
                     show_trailers,
                     use_mailmap: app.use_mailmap && !preview_author_copy && copy_feedback != Some(CopyKind::Author),
                     ref_mode,
-                    selected: selected == Some(start + index),
+                    selected: selected == Some(start + index) && app.show_selection_tail,
                     preview_author_copy,
                     copy_feedback: if selected == Some(start + index) {
                         copy_feedback
@@ -128,7 +128,7 @@ pub(crate) fn draw(
         let selected = app.selected == Some(start + index);
         let metadata_width = metadata.width();
         let signature_color = signature_color(visible_rows[index].signature);
-        let style = if selected {
+        let style = if selected && app.show_selection_tail {
             color(signature_color).add_modifier(Modifier::REVERSED)
         } else {
             Style::default()
@@ -149,7 +149,7 @@ pub(crate) fn draw(
                 row_area,
                 lane,
                 graph_offset,
-                selected,
+                selected && app.show_selection_tail,
                 visible_rows[index].signature,
             );
             let aligned = Rect::new(
@@ -173,7 +173,7 @@ pub(crate) fn draw(
                 row_area,
                 lane,
                 horizontal_offset,
-                selected,
+                selected && app.show_selection_tail,
                 visible_rows[index].signature,
             );
         }
@@ -1328,6 +1328,7 @@ mod tests {
             buffer[(23, 1)].modifier.contains(Modifier::REVERSED),
             "a clipped selection marker uses the right border"
         );
+        let hash_color = buffer[(5, 1)].fg;
         assert_eq!(app.selected, Some(2), "drawing preserves the global selection");
         assert_eq!(app.offset, 1, "drawing preserves the global offset");
 
@@ -1335,9 +1336,22 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app, &Decorations::new()))?;
         let buffer = terminal.backend().buffer();
         assert!(
-            buffer[(0, 1)].modifier.contains(Modifier::REVERSED),
-            "the final frame keeps the left selection marker"
+            !buffer[(0, 1)].modifier.contains(Modifier::REVERSED | Modifier::DIM),
+            "the inactive marker has no selection modifiers"
         );
+        assert!(
+            !buffer[(5, 1)].modifier.contains(Modifier::REVERSED | Modifier::DIM),
+            "the inactive hash has no selection modifiers"
+        );
+        assert_eq!(buffer[(0, 1)].symbol(), ">", "the inactive row keeps its marker");
+        assert_eq!(buffer[(0, 1)].fg, Color::Reset, "the marker uses normal text color");
+        assert_eq!(
+            buffer[(0, 1)].bg,
+            Color::Reset,
+            "the marker has no selection background"
+        );
+        assert_eq!(buffer[(5, 1)].fg, hash_color, "the hash returns to its normal color");
+        assert_eq!(buffer[(5, 1)].bg, Color::Reset, "the hash has no selection background");
         assert!(
             !buffer[(23, 1)].modifier.contains(Modifier::REVERSED),
             "the final frame hides the trailing selection marker"
