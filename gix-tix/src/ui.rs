@@ -137,8 +137,9 @@ pub(crate) fn draw(
         let y = body.y.saturating_add(index as u16);
         let selected = app.selected == Some(start + index);
         let metadata_width = metadata.width();
+        let signature_color = signature_color(visible_rows[index].signature);
         let style = if selected {
-            Style::default().add_modifier(Modifier::REVERSED)
+            color(signature_color).add_modifier(Modifier::REVERSED)
         } else {
             Style::default()
         };
@@ -538,21 +539,23 @@ fn color_graph(
         if symbol.is_whitespace() {
             continue;
         }
-        let mut style = if symbol == '●' {
-            Style::default().fg(match signature {
-                SignatureState::Unsigned => Color::Blue,
-                SignatureState::Unverified | SignatureState::Verifying => Color::Rgb(255, 165, 0),
-                SignatureState::Verified => Color::Green,
-                SignatureState::Failed => Color::Red,
-            })
-            .remove_modifier(Modifier::REVERSED)
+        let style = if selected {
+            color(signature_color(signature)).add_modifier(Modifier::REVERSED)
+        } else if symbol == '●' {
+            color(signature_color(signature))
         } else {
             graph_style(offset.saturating_add(x) / 2)
         };
-        if selected && symbol != '●' {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
         frame.buffer_mut()[(area.x + x as u16, area.y)].set_style(style);
+    }
+}
+
+fn signature_color(signature: SignatureState) -> Color {
+    match signature {
+        SignatureState::Unsigned => Color::Blue,
+        SignatureState::Unverified | SignatureState::Verifying => Color::Rgb(255, 165, 0),
+        SignatureState::Verified => Color::Green,
+        SignatureState::Failed => Color::Red,
     }
 }
 
@@ -750,7 +753,9 @@ mod tests {
         for x in 0..11 {
             expected[(x, 0)].set_style(Style::default().add_modifier(Modifier::REVERSED));
         }
-        expected[(2, 0)].set_style(Style::default().fg(Color::Blue).remove_modifier(Modifier::REVERSED));
+        for x in 0..4 {
+            expected[(x, 0)].set_style(Style::default().fg(Color::Blue).add_modifier(Modifier::REVERSED));
+        }
         for x in 4..11 {
             expected[(x, 0)].set_style(
                 Style::default()
@@ -768,7 +773,7 @@ mod tests {
             expected[(x, 0)].set_style(Style::default().fg(Color::Green));
         }
         expected[(selected_line.chars().count() as u16 + 1, 0)]
-            .set_style(Style::default().add_modifier(Modifier::REVERSED));
+            .set_style(Style::default().fg(Color::Blue).add_modifier(Modifier::REVERSED));
         let commit = footer_text[..footer_text.find("o commit").expect("the commit toggle is present")]
             .chars()
             .count();
@@ -986,15 +991,19 @@ mod tests {
             (SignatureState::Verified, Color::Green),
             (SignatureState::Failed, Color::Red),
         ];
-        let mut terminal = Terminal::new(TestBackend::new(1, states.len() as u16))?;
+        let mut terminal = Terminal::new(TestBackend::new(2, states.len() as u16))?;
         terminal.draw(|frame| {
             for (y, (state, _)) in states.iter().enumerate() {
-                color_graph(frame, Rect::new(0, y as u16, 1, 1), "●", 0, false, *state);
+                color_graph(frame, Rect::new(0, y as u16, 2, 1), "●─", 0, true, *state);
             }
         })?;
 
         for (y, (_, expected)) in states.iter().enumerate() {
-            assert_eq!(terminal.backend().buffer()[(0, y as u16)].fg, *expected);
+            for x in 0..2 {
+                let cell = &terminal.backend().buffer()[(x, y as u16)];
+                assert_eq!(cell.fg, *expected);
+                assert!(cell.modifier.contains(Modifier::REVERSED));
+            }
         }
         Ok(())
     }
