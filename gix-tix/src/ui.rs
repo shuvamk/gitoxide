@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, AttributionKind, CommitRow, CopyKind, NameMode, RefMode, State},
+    app::{App, AttributionKind, CommitRow, CopyKind, NameMode, RefMode, SignatureState, State},
     history::{DecorationKind, Decorations},
 };
 
@@ -42,6 +42,9 @@ pub(crate) fn draw(
     let start = app.offset.min(app.rows.len());
     let end = start.saturating_add(app.viewport_rows).min(app.rows.len());
     let visible_rows = &app.rows[start..end];
+    let has_verifiable_signatures = visible_rows
+        .iter()
+        .any(|row| matches!(row.signature, SignatureState::Unverified | SignatureState::Verifying));
     let lanes = app.render_lanes(start..end);
     let content = Rect::new(
         body.x.saturating_add(2),
@@ -150,7 +153,14 @@ pub(crate) fn draw(
                 Paragraph::new(lane).style(style).scroll((0, graph_offset as u16)),
                 row_area,
             );
-            color_graph(frame, row_area, lane, graph_offset, selected);
+            color_graph(
+                frame,
+                row_area,
+                lane,
+                graph_offset,
+                selected,
+                visible_rows[index].signature,
+            );
             let aligned = Rect::new(
                 content.x.saturating_add(align_width as u16),
                 y,
@@ -167,7 +177,14 @@ pub(crate) fn draw(
                 Paragraph::new(Line::from(spans)).scroll((0, horizontal_offset as u16)),
                 row_area,
             );
-            color_graph(frame, row_area, lane, horizontal_offset, selected);
+            color_graph(
+                frame,
+                row_area,
+                lane,
+                horizontal_offset,
+                selected,
+                visible_rows[index].signature,
+            );
         }
         if selected && app.show_selection_tail && body.width > 0 {
             let line_width = if align_metadata {
@@ -238,6 +255,19 @@ pub(crate) fn draw(
     } else {
         " · y copy"
     }));
+    if app.signature_failures > 0 {
+        footer_spans.extend([
+            Span::raw(format!(" · s {} ", app.signature_failures)),
+            Span::styled("●", color(Color::Red)),
+        ]);
+    } else if has_verifiable_signatures {
+        footer_spans.extend([
+            Span::raw(" · s "),
+            Span::styled("●", color(Color::Rgb(255, 165, 0))),
+            Span::raw(" -> "),
+            Span::styled("●", color(Color::Green)),
+        ]);
+    }
     if app.state == State::Loading {
         footer_spans.push(Span::raw(" · Esc cancel"));
     }
@@ -496,17 +526,30 @@ fn color(color: Color) -> Style {
     Style::default().fg(color)
 }
 
-fn color_graph(frame: &mut Frame<'_>, area: Rect, graph: &str, offset: usize, selected: bool) {
+fn color_graph(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    graph: &str,
+    offset: usize,
+    selected: bool,
+    signature: SignatureState,
+) {
     for (x, symbol) in graph.chars().skip(offset).take(area.width as usize).enumerate() {
         if symbol.is_whitespace() {
             continue;
         }
         let mut style = if symbol == '●' {
-            Style::default().fg(Color::Blue)
+            Style::default().fg(match signature {
+                SignatureState::Unsigned => Color::Blue,
+                SignatureState::Unverified | SignatureState::Verifying => Color::Rgb(255, 165, 0),
+                SignatureState::Verified => Color::Green,
+                SignatureState::Failed => Color::Red,
+            })
+            .remove_modifier(Modifier::REVERSED)
         } else {
             graph_style(offset.saturating_add(x) / 2)
         };
-        if selected {
+        if selected && symbol != '●' {
             style = style.add_modifier(Modifier::REVERSED);
         }
         frame.buffer_mut()[(area.x + x as u16, area.y)].set_style(style);
@@ -573,6 +616,7 @@ mod tests {
                 attributions: 0..7,
                 title: "subject".into(),
                 metadata_loaded: true,
+                signature: SignatureState::Unsigned,
             }],
             attributions: vec![
                 Attribution {
@@ -678,6 +722,7 @@ mod tests {
             attributions: 0..0,
             title: "subject".into(),
             metadata_loaded: true,
+            signature: SignatureState::Unsigned,
         }]);
         complete(&mut app);
         let decorations = Decorations::from([(
@@ -705,7 +750,7 @@ mod tests {
         for x in 0..11 {
             expected[(x, 0)].set_style(Style::default().add_modifier(Modifier::REVERSED));
         }
-        expected[(2, 0)].set_style(Style::default().fg(Color::Blue).add_modifier(Modifier::REVERSED));
+        expected[(2, 0)].set_style(Style::default().fg(Color::Blue).remove_modifier(Modifier::REVERSED));
         for x in 4..11 {
             expected[(x, 0)].set_style(
                 Style::default()
@@ -872,6 +917,7 @@ mod tests {
                     attributions: 0..0,
                     title: format!("subject {n}").into(),
                     metadata_loaded: true,
+                    signature: SignatureState::Unsigned,
                 })
                 .collect::<Vec<_>>(),
         );
@@ -933,6 +979,53 @@ mod tests {
     }
 
     #[test]
+    fn colors_commit_disks_by_signature_state() -> Result<(), Box<dyn std::error::Error>> {
+        let states = [
+            (SignatureState::Unsigned, Color::Blue),
+            (SignatureState::Unverified, Color::Rgb(255, 165, 0)),
+            (SignatureState::Verified, Color::Green),
+            (SignatureState::Failed, Color::Red),
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(1, states.len() as u16))?;
+        terminal.draw(|frame| {
+            for (y, (state, _)) in states.iter().enumerate() {
+                color_graph(frame, Rect::new(0, y as u16, 1, 1), "●", 0, false, *state);
+            }
+        })?;
+
+        for (y, (_, expected)) in states.iter().enumerate() {
+            assert_eq!(terminal.backend().buffer()[(0, y as u16)].fg, *expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shows_signature_action_only_while_actionable() -> Result<(), Box<dyn std::error::Error>> {
+        let id = gix::ObjectId::Sha1([1; 20]);
+        let mut app = App::new(1);
+        app.extend_commits(vec![Commit {
+            id,
+            parent_ids: Default::default(),
+            committer_time: gix::date::Time::default(),
+            author: author(b"author", b"author@example.com"),
+            attributions: 0..0,
+            title: "subject".into(),
+            metadata_loaded: true,
+            signature: SignatureState::Unverified,
+        }]);
+        complete(&mut app);
+        let mut terminal = Terminal::new(TestBackend::new(160, 2))?;
+
+        terminal.draw(|frame| draw(frame, &mut app, &Decorations::new()))?;
+        assert!(rendered_line(&terminal, 1).contains("s ● -> ●"));
+
+        app.finish_signature_verification(vec![(id, false)]);
+        terminal.draw(|frame| draw(frame, &mut app, &Decorations::new()))?;
+        assert!(rendered_line(&terminal, 1).contains("s 1 ●"));
+        Ok(())
+    }
+
+    #[test]
     fn advertises_cancel_only_while_loading() -> Result<(), Box<dyn std::error::Error>> {
         let mut app = App::new(1);
         let mut terminal = Terminal::new(TestBackend::new(180, 2))?;
@@ -961,6 +1054,7 @@ mod tests {
             attributions: 0..0,
             title: "subject".into(),
             metadata_loaded: true,
+            signature: SignatureState::Unsigned,
         }]);
         let mut terminal = Terminal::new(TestBackend::new(120, 6))?;
 
@@ -1118,6 +1212,7 @@ mod tests {
                     attributions: 0..0,
                     title: format!("subject {n}").into(),
                     metadata_loaded: true,
+                    signature: SignatureState::Unsigned,
                 })
                 .collect::<Vec<_>>(),
         );
@@ -1166,6 +1261,7 @@ mod tests {
             attributions: 0..0,
             title: "subject".into(),
             metadata_loaded: true,
+            signature: SignatureState::Unsigned,
         };
         let decorations = Decorations::from([(
             id,
@@ -1268,6 +1364,7 @@ mod tests {
             attributions: 0..0,
             title: format!("{} subject-tail", "a".repeat(50)).into(),
             metadata_loaded: true,
+            signature: SignatureState::Unsigned,
         }]);
         complete(&mut app);
         app.set_lane(0, &format!("{}{}", "A".repeat(40), "B".repeat(40)));
