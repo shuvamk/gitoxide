@@ -203,6 +203,7 @@ pub(crate) struct App {
     horizontal_page: usize,
     horizontal_max: usize,
     follow_tail: bool,
+    reload_selection: Option<ObjectId>,
     pub(crate) signature_failures: usize,
     signature_verification_running: bool,
 }
@@ -240,6 +241,7 @@ impl App {
             horizontal_page: 1,
             horizontal_max: 0,
             follow_tail: false,
+            reload_selection: None,
             signature_failures: 0,
             signature_verification_running: false,
         }
@@ -275,6 +277,14 @@ impl App {
             self.ensure_visible();
         } else if self.follow_tail {
             self.selected = Some(self.rows.len() - 1);
+            self.ensure_visible();
+        }
+        if let Some(index) = self
+            .reload_selection
+            .and_then(|id| self.rows.iter().position(|row| row.id == id))
+        {
+            self.selected = Some(index);
+            self.reload_selection = None;
             self.ensure_visible();
         }
     }
@@ -445,6 +455,7 @@ impl App {
             State::Loading => {
                 self.state = State::Computing;
                 self.follow_tail = false;
+                self.reload_selection = None;
                 Some(self.rows.clone())
             }
             State::Cancelling => {
@@ -500,6 +511,7 @@ impl App {
     }
 
     pub(crate) fn reload(&mut self, show_hidden: bool) {
+        self.reload_selection = self.selected.and_then(|index| self.rows.get(index)).map(|row| row.id);
         self.rows = Vec::new();
         self.titles = Vec::new();
         self.graph = None;
@@ -1271,6 +1283,28 @@ mod tests {
         );
         complete(&mut app);
         assert_eq!(app.update(Action::ToggleHidden), vec![Effect::Reload(false)]);
+    }
+
+    #[test]
+    fn reload_retains_selection_or_falls_back_to_the_top() {
+        let mut app = App::new(3);
+        app.extend_commits(vec![row(1), row(2), row(3)]);
+        complete(&mut app);
+        app.update(Action::MoveDown);
+        let selected = app.rows[app.selected.expect("a row is selected")].id;
+
+        app.reload(true);
+        app.extend_commits(vec![row(1), row(2), row(3)]);
+        complete(&mut app);
+        assert_eq!(
+            app.rows[app.selected.expect("the old row remains selected")].id,
+            selected
+        );
+
+        app.reload(false);
+        app.extend_commits(vec![row(3)]);
+        complete(&mut app);
+        assert_eq!(app.selected, Some(0), "a filtered selection falls back to the top row");
     }
 
     #[test]
