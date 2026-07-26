@@ -668,6 +668,7 @@ fn action(key: KeyEvent) -> Option<Action> {
         KeyCode::Home | KeyCode::Char('g') => Some(Action::First),
         KeyCode::End | KeyCode::Char('G') => Some(Action::Last),
         KeyCode::Char('d') => Some(Action::ToggleDate),
+        KeyCode::Char('e') => Some(Action::ToggleEmail),
         KeyCode::Char('n') => Some(Action::ToggleName),
         KeyCode::Char('t') => Some(Action::ToggleTrailers),
         KeyCode::Char('m') => Some(Action::ToggleMailmap),
@@ -822,6 +823,10 @@ mod tests {
         assert_eq!(
             action(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
             Some(Action::ToggleDate)
+        );
+        assert_eq!(
+            action(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)),
+            Some(Action::ToggleEmail)
         );
         assert_eq!(
             action(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),

@@ -139,6 +139,7 @@ pub(crate) enum Action {
     Last,
     ToggleDate,
     ToggleName,
+    ToggleEmail,
     ToggleTrailers,
     ToggleMailmap,
     ToggleRefs,
@@ -178,6 +179,7 @@ pub(crate) struct App {
     pub lane_time: Option<Duration>,
     pub show_committer_date: bool,
     pub name_mode: NameMode,
+    pub show_emails: bool,
     pub show_trailers: bool,
     pub use_mailmap: bool,
     pub ref_mode: RefMode,
@@ -214,6 +216,7 @@ impl App {
             lane_time: None,
             show_committer_date: true,
             name_mode: NameMode::All,
+            show_emails: false,
             show_trailers: true,
             use_mailmap: true,
             ref_mode: RefMode::Default,
@@ -350,6 +353,7 @@ impl App {
                 self.ensure_visible();
             }
             Action::ToggleDate => self.show_committer_date = !self.show_committer_date,
+            Action::ToggleEmail => self.show_emails = !self.show_emails,
             Action::ToggleName => {
                 let start = self.offset.min(self.rows.len());
                 let end = start.saturating_add(self.viewport_rows).min(self.rows.len());
@@ -1177,6 +1181,7 @@ mod tests {
         assert!(app.show_trailers, "trailer attribution is visible by default");
 
         app.update(Action::ToggleDate);
+        app.update(Action::ToggleEmail);
         app.update(Action::ToggleName);
         app.update(Action::ToggleTrailers);
         app.update(Action::ToggleMailmap);
@@ -1185,6 +1190,7 @@ mod tests {
         app.update(Action::ToggleCommit);
 
         assert!(!app.show_committer_date);
+        assert!(app.show_emails);
         assert_eq!(app.name_mode, NameMode::None);
         assert!(!app.show_trailers);
         assert!(!app.use_mailmap);
