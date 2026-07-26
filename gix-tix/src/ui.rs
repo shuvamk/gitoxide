@@ -437,13 +437,16 @@ fn metadata_line<'a>(
     }
     if show_author_name {
         let author = author_label(row.author, mailmap, use_mailmap, show_emails && !row.author.is_bot());
-        let author_style = if copy_feedback == Some(CopyKind::Author) {
+        let mut author_style = if copy_feedback == Some(CopyKind::Author) {
             Style::default()
         } else if preview_author_copy {
             color(Color::Magenta).add_modifier(Modifier::BOLD)
         } else {
             color(Color::Green)
         };
+        if row.author.is_github_noreply() {
+            author_style = author_style.add_modifier(Modifier::ITALIC);
+        }
         spans.push(Span::styled(
             if row.author.is_bot() {
                 format!("[{author}] ")
@@ -476,7 +479,12 @@ fn metadata_line<'a>(
                         let name = author_label(actor.author, mailmap, use_mailmap, show_emails && !actor.is_agent());
                         if actor.is_agent() { format!("[{name}]") } else { name }
                     };
-                    spans.push(Span::styled(name, color(Color::Green)));
+                    let style = if actor.author.is_github_noreply() {
+                        color(Color::Green).add_modifier(Modifier::ITALIC)
+                    } else {
+                        color(Color::Green)
+                    };
+                    spans.push(Span::styled(name, style));
                 }
                 spans.push(Span::raw(" "));
             }
@@ -745,6 +753,43 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app, &Decorations::new()))?;
         assert!(!rendered_row(&terminal).contains("<author@example.com>"));
         assert!(rendered_row(&terminal).contains("unique comment"));
+        Ok(())
+    }
+
+    #[test]
+    fn italicizes_github_noreply_actors() -> Result<(), Box<dyn std::error::Error>> {
+        let mut app = App::new(1);
+        app.extend_commits(LoadedCommits {
+            rows: vec![Commit {
+                id: gix::ObjectId::Sha1([1; 20]),
+                parent_ids: Default::default(),
+                committer_time: gix::date::Time::default(),
+                author: author(b"Author", b"1+author@users.noreply.github.com"),
+                attributions: 0..1,
+                title: "subject".into(),
+                metadata_loaded: true,
+                signature: SignatureState::Unsigned,
+            }],
+            attributions: vec![Attribution {
+                kind: AttributionKind::Reviewed,
+                author: author(b"Reviewer", b"reviewer@USERS.NOREPLY.GITHUB.COM"),
+            }],
+        });
+        app.selected = None;
+        app.update(Action::ToggleEmail);
+        let mut terminal = Terminal::new(TestBackend::new(160, 2))?;
+        terminal.draw(|frame| draw(frame, &mut app, &Decorations::new()))?;
+
+        let row = rendered_row(&terminal);
+        for actor in [
+            "Author <1+author@users.noreply.github.com>",
+            "Reviewer <reviewer@USERS.NOREPLY.GITHUB.COM>",
+        ] {
+            let start = row.find(actor).expect("the full actor is rendered") as u16;
+            for x in start..start + actor.len() as u16 {
+                assert!(terminal.backend().buffer()[(x, 0)].modifier.contains(Modifier::ITALIC));
+            }
+        }
         Ok(())
     }
 

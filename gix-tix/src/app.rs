@@ -53,6 +53,13 @@ impl Author {
             .iter()
             .any(|candidate| self.email.eq_ignore_ascii_case(candidate))
     }
+
+    pub fn is_github_noreply(&self) -> bool {
+        let suffix = b"@users.noreply.github.com";
+        self.email
+            .get(self.email.len().saturating_sub(suffix.len())..)
+            .is_some_and(|email| email.eq_ignore_ascii_case(suffix))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
