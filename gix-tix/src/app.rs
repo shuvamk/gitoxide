@@ -507,6 +507,7 @@ impl App {
         self.show_hidden = show_hidden;
         self.horizontal_offset = 0;
         self.follow_tail = false;
+        self.preview_author_copy = false;
         self.signature_failures = 0;
         self.signature_verification_running = false;
     }
@@ -1251,9 +1252,11 @@ mod tests {
         );
         complete(&mut app);
         assert_eq!(app.update(Action::ToggleHidden), vec![Effect::Reload(true)]);
+        drop(app.update(Action::PreviewAuthorCopy(true)));
         app.reload(true);
         assert!(app.rows.is_empty(), "reloading drops rows from the previous view");
         assert!(app.show_hidden);
+        assert!(!app.preview_author_copy, "reloading clears transient Shift state");
         assert_eq!(app.state, State::Loading);
         assert!(
             app.update(Action::ToggleHidden).is_empty(),
