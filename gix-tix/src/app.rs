@@ -51,15 +51,7 @@ pub(crate) struct Attribution {
 
 impl Attribution {
     pub fn is_agent(&self) -> bool {
-        self.author.is_bot()
-            || self.kind == AttributionKind::Assisted
-                && [b"opus".as_slice(), b"gpt".as_slice()].iter().any(|name| {
-                    self.author
-                        .name
-                        .get(..name.len())
-                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
-                        && self.author.name.get(name.len()).is_none_or(u8::is_ascii_whitespace)
-                })
+        self.author.is_bot() || self.kind == AttributionKind::Assisted
     }
 }
 
@@ -841,34 +833,23 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_named_agents_only_when_assisting() {
-        let opus = Box::leak(Box::new(Author {
-            name: b"Opus 4.7".as_bstr(),
-            email: b"".as_bstr(),
-        }));
-        let gpt = Box::leak(Box::new(Author {
-            name: b"GPT 5.6".as_bstr(),
+    fn recognizes_all_assistants_as_agents() {
+        let assistant = Box::leak(Box::new(Author {
+            name: b"Anything".as_bstr(),
             email: b"".as_bstr(),
         }));
 
         assert!(
             Attribution {
                 kind: AttributionKind::Assisted,
-                author: opus,
-            }
-            .is_agent()
-        );
-        assert!(
-            Attribution {
-                kind: AttributionKind::Assisted,
-                author: gpt,
+                author: assistant,
             }
             .is_agent()
         );
         assert!(
             !Attribution {
                 kind: AttributionKind::Reviewed,
-                author: opus,
+                author: assistant,
             }
             .is_agent()
         );
