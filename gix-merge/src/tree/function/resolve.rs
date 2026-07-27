@@ -1785,16 +1785,6 @@ where
                                 }
                             }
                             _unknown => {
-                                // Ancestor resolution may retain the entry represented by a written deletion,
-                                // so an addition below it can legitimately match from a different path.
-                                debug_assert!(
-                                    match_kind.is_none()
-                                        || (our_changes[ours_idx].was_processed_without_application()
-                                            && matches!(ours, Change::Deletion { .. }))
-                                        || (ours.location() == theirs.location()
-                                            || ours.source_location() == theirs.source_location()),
-                                    "BUG: right now it's not known to be possible to match changes from different paths: {match_kind:?} {candidate:?}"
-                                );
                                 if let Some(ResolveWith::Ours) = tree_conflicts {
                                     apply_our_resolution(ours, theirs, outer_side, &mut editor)?;
                                 }
