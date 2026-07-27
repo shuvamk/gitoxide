@@ -563,6 +563,36 @@ git init identical-renames-to-same-destination
   git commit -m "rename two to target"
 )
 
+git init identical-renames-to-same-destination-with-mode-change
+(cd identical-renames-to-same-destination-with-mode-change
+  write_lines same >one
+  cp one two
+  git add .
+  git commit -m "two identical files"
+
+  git branch A
+  git branch B
+
+  # The destinations have the same blob ID but differ in executable mode.
+  # Content merging must see those original modes even though the final mode
+  # has already been selected.
+  git checkout A
+  git mv one target
+  chmod +x target
+  git add target
+  git commit -m "rename one to executable target"
+
+  git checkout B
+  git mv two target
+  git commit -m "rename two to target"
+
+  # gix treats the identical content as clean and carries the executable mode
+  # selected from A to the shared destination in both merge directions.
+  git checkout -b expected A
+  git rm two
+  git commit -m "expected gix merge"
+)
+
 git init deleted-file-added-dir-with-rename
 (cd deleted-file-added-dir-with-rename
   # Regression for a deletion that is processed but not applied:
@@ -1899,6 +1929,7 @@ baseline same-rename-with-content A-B A B
 baseline same-rename-and-file-to-directory A-B A B
 baseline renames-to-same-destination A-B A B
 baseline identical-renames-to-same-destination A-B A B
+baseline identical-renames-to-same-destination-with-mode-change A-B A B "gix resolves the identical content and mode change cleanly, while Git leaves an add/add mode conflict"
 baseline deleted-file-added-dir-with-rename A-B A B
 baseline rename-add A-B A B
 baseline rename-add A-B-diff3 A B
@@ -2477,6 +2508,25 @@ EOF
   make_resolve_tree ancestor A B
   make_resolve_tree ancestor B A
   make_resolve_tree ours A B
+  make_resolve_tree ours B A
+)
+
+(cd identical-renames-to-same-destination-with-mode-change
+  # Git leaves the two destination modes at stages 2 and 3. gix resolves the
+  # identical content and the one-sided executable change into a stage-0 entry.
+  git read-tree expected
+  make_conflict_index identical-renames-to-same-destination-with-mode-change-A-B
+  make_conflict_index identical-renames-to-same-destination-with-mode-change-A-B-reversed
+
+  # Ancestor rejects both colliding renames.
+  git read-tree main
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+
+  # Ours applies the selected side's rename and retains the other source.
+  git read-tree A
+  make_resolve_tree ours A B
+  git read-tree B
   make_resolve_tree ours B A
 )
 
