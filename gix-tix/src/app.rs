@@ -603,15 +603,8 @@ impl App {
             self.reachable_rows = None;
             return;
         };
-        let mut pending = HashSet::from([anchor]);
-        let mut excluded: HashSet<_> = self
-            .rows
-            .iter()
-            .find(|row| row.id == anchor && row.parent_ids.len() > 1)
-            .and_then(|row| row.parent_ids.iter().next().copied())
-            .into_iter()
-            .collect();
-        self.reachable_rows = Some(
+        let ancestors_of = |start| {
+            let mut pending = HashSet::from([start]);
             self.rows
                 .iter()
                 .map(|row| {
@@ -619,12 +612,41 @@ impl App {
                     if reachable {
                         pending.extend(row.parent_ids.iter().copied());
                     }
-                    let first_parent_reachable = excluded.remove(&row.id);
-                    if first_parent_reachable {
-                        excluded.extend(row.parent_ids.iter().copied());
-                    }
-                    reachable && !first_parent_reachable
+                    reachable
                 })
+                .collect::<Vec<_>>()
+        };
+        let reachable = ancestors_of(anchor);
+        let Some(mut parents) = self
+            .rows
+            .iter()
+            .find(|row| row.id == anchor && row.parent_ids.len() > 1)
+            .map(|row| row.parent_ids.iter().copied())
+        else {
+            self.reachable_rows = Some(reachable);
+            return;
+        };
+        let first_parent = ancestors_of(parents.next().expect("a merge has a first parent"));
+        let mut merge_bases = vec![false; self.rows.len()];
+        for parent in parents {
+            let other_parent = ancestors_of(parent);
+            let mut covered = HashSet::new();
+            for (index, row) in self.rows.iter().enumerate() {
+                let covered_by_newer_base = covered.remove(&row.id);
+                if covered_by_newer_base || first_parent[index] && other_parent[index] {
+                    if !covered_by_newer_base {
+                        merge_bases[index] = true;
+                    }
+                    covered.extend(row.parent_ids.iter().copied());
+                }
+            }
+        }
+        self.reachable_rows = Some(
+            reachable
+                .into_iter()
+                .zip(first_parent)
+                .zip(merge_bases)
+                .map(|((reachable, first_parent), merge_base)| reachable && !first_parent || merge_base)
                 .collect(),
         );
     }
@@ -1456,8 +1478,39 @@ mod tests {
             .collect();
         assert_eq!(
             reachable,
-            [id(6), id(4), id(2)],
-            "the merge side excludes first-parent history and shared ancestors"
+            [id(6), id(4), id(2), id(1)],
+            "the merge side excludes first-parent history except for its fork point"
+        );
+    }
+
+    #[test]
+    fn shift_includes_each_other_parents_best_merge_bases() {
+        let mut app = App::new(9);
+        app.extend_commits(vec![
+            row_with_parents(10, &[8, 9, 11]),
+            row_with_parents(8, &[6, 7]),
+            row_with_parents(9, &[7, 6]),
+            row_with_parents(11, &[5]),
+            row_with_parents(7, &[5]),
+            row_with_parents(6, &[5]),
+            row_with_parents(5, &[1]),
+            row(1),
+        ]);
+        complete(&mut app);
+        app.selected = app.rows.iter().position(|row| row.id == id(10));
+
+        app.update(Action::PreviewAuthorCopy(true));
+        let reachable: HashSet<_> = app
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| app.is_row_reachable(*index))
+            .map(|(_, row)| row.id)
+            .collect();
+        assert_eq!(
+            reachable,
+            HashSet::from([id(10), id(9), id(11), id(7), id(6), id(5)]),
+            "all best pairwise merge bases are included, but their older shared ancestor is not"
         );
     }
 
