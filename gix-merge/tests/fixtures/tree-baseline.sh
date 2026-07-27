@@ -1603,6 +1603,33 @@ git init directory-rename-vs-directory-to-file
   git commit -m "replace a directory with its file"
 )
 
+git init directory-rename-vs-renamed-file-replacement
+(cd directory-rename-vs-renamed-file-replacement
+  mkdir -p h/h
+  write_lines nested >h/h/a
+  write_lines outside >a
+  git add .
+  git commit -m "directory and outside file"
+
+  git branch A
+  git branch B
+
+  # A moves the directory away. B deletes its contents and moves an unrelated
+  # file onto the vacated directory path. Unlike the contained-file variant
+  # above, the replacement rename has a distinct source, so it can meet the
+  # structural directory rewrite before the nested rename/delete pair does.
+  git checkout A
+  git mv h/h f
+  rmdir h
+  git commit -m "rename the directory"
+
+  git checkout B
+  git rm h/h/a
+  mkdir -p h
+  git mv a h/h
+  git commit -m "replace the directory with a renamed file"
+)
+
 git init type-change-to-symlink
 (cd type-change-to-symlink
   touch a b link
@@ -1701,6 +1728,7 @@ baseline added-symlink-blocks-gitlink-directory A-B A B
 baseline modified-file-vs-gitlink-directory A-B A B
 baseline relocated-addition-blocked-by-rename A-B A B
 baseline directory-rename-vs-directory-to-file A-B A B
+baseline directory-rename-vs-renamed-file-replacement A-B A B
 baseline type-change-to-symlink A-B A B
 
 ##
@@ -1781,6 +1809,40 @@ baseline type-change-to-symlink A-B A B
 
   # Choosing ours keeps precisely the directory rename or directory-to-file
   # replacement selected by the merge direction.
+  git read-tree A
+  make_resolve_tree ours A B
+  git read-tree B
+  make_resolve_tree ours B A
+)
+
+(cd directory-rename-vs-renamed-file-replacement
+  # Git retains the original file as stage 1 at its rename destination. Like the
+  # other rename/delete cases, gix records only the side that kept the file.
+  IFS= read -r -d '' merged_tree_id <A-B.merge-info
+  rm .git/index
+  git read-tree "$merged_tree_id"
+  git update-index --force-remove f/a
+  git update-index --index-info <<EOF
+100644 blob $(git rev-parse A:f/a) 2	f/a
+EOF
+  make_conflict_index directory-rename-vs-renamed-file-replacement-A-B
+
+  rm .git/index
+  git read-tree "$merged_tree_id"
+  git update-index --force-remove f/a
+  git update-index --index-info <<EOF
+100644 blob $(git rev-parse A:f/a) 3	f/a
+EOF
+  make_conflict_index directory-rename-vs-renamed-file-replacement-A-B-reversed
+
+  # Ancestor resolution rejects both conflicting renames and restores the original
+  # directory and outside file.
+  git read-tree main
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+
+  # Choosing ours keeps precisely the directory rename or file replacement selected
+  # by the merge direction.
   git read-tree A
   make_resolve_tree ours A B
   git read-tree B

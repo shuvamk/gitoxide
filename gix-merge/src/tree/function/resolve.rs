@@ -907,6 +907,34 @@ where
                             }
                             (
                                 Change::Rewrite {
+                                    source_location,
+                                    entry_mode: tree_mode,
+                                    ..
+                                },
+                                Change::Rewrite { location, .. },
+                            ) if tree_mode.is_tree()
+                                && location == source_location
+                                && matches!(match_kind, Some(MatchKind::EraseTree)) =>
+                            {
+                                // The leaf rename occupies a path vacated by the directory rename.
+                                // Descendant changes resolve the actual rename/delete conflict.
+                                match tree_conflicts {
+                                    None => {
+                                        apply_change(&mut editor, theirs, None)?;
+                                        theirs_disposition = ChangeDisposition::Applied;
+                                    }
+                                    Some(ResolveWith::Ours) => {
+                                        apply_our_resolution(ours, theirs, outer_side, &mut editor)?;
+                                        match outer_side {
+                                            Original => ours_disposition = ChangeDisposition::Applied,
+                                            Swapped => theirs_disposition = ChangeDisposition::Applied,
+                                        }
+                                    }
+                                    Some(ResolveWith::Ancestor) => {}
+                                }
+                            }
+                            (
+                                Change::Rewrite {
                                     source_location: our_source_location,
                                     entry_mode: our_mode,
                                     id: our_id,
