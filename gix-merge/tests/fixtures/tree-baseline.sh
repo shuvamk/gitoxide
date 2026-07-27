@@ -1709,6 +1709,32 @@ git init unrelated-renames-to-same-path-with-type-mismatch
   git commit -m "rename the regular file to target"
 )
 
+git init renamed-file-vs-file-to-directory-with-siblings
+(cd renamed-file-vs-file-to-directory-with-siblings
+  write_lines base >a
+  git add a
+  git commit -m "base file"
+
+  git branch A
+  git branch B
+
+  # A renames the base file away while B replaces its old path with a directory
+  # containing two children. Both children encounter the same rename/delete
+  # conflict; handling the first must not make the second try to remove an
+  # already-pruned rename-destination node.
+  git checkout A
+  git mv a h
+  git commit -m "rename the file"
+
+  git checkout B
+  git rm a
+  mkdir a
+  write_lines first >a/a
+  write_lines second >a/c
+  git add .
+  git commit -m "replace the file with two children"
+)
+
 git init type-change-to-symlink
 (cd type-change-to-symlink
   touch a b link
@@ -1811,6 +1837,7 @@ baseline directory-rename-vs-renamed-file-replacement A-B A B
 baseline unrelated-renames-overlapping-destinations A-B A B
 baseline renamed-file-inside-renamed-directory A-B A B
 baseline unrelated-renames-to-same-path-with-type-mismatch A-B A B
+baseline renamed-file-vs-file-to-directory-with-siblings A-B A B
 baseline type-change-to-symlink A-B A B
 
 ##
@@ -1997,6 +2024,43 @@ EOF
   # Choosing ours applies only the rename from the side named first.
   git read-tree A
   make_resolve_tree ours A B
+  git read-tree B
+  make_resolve_tree ours B A
+)
+
+(cd renamed-file-vs-file-to-directory-with-siblings
+  # Git retains the base file as stage 1 at its rename destination. As in the
+  # other rename/delete cases, gix records only the side that kept the file.
+  IFS= read -r -d '' merged_tree_id <A-B.merge-info
+  rm .git/index
+  git read-tree "$merged_tree_id"
+  git update-index --force-remove h
+  git update-index --index-info <<EOF
+100644 blob $(git rev-parse A:h) 2	h
+EOF
+  make_conflict_index renamed-file-vs-file-to-directory-with-siblings-A-B
+
+  rm .git/index
+  git read-tree "$merged_tree_id"
+  git update-index --force-remove h
+  git update-index --index-info <<EOF
+100644 blob $(git rev-parse A:h) 3	h
+EOF
+  make_conflict_index renamed-file-vs-file-to-directory-with-siblings-A-B-reversed
+
+  # Ancestor resolution rejects the rename and the file-to-directory
+  # replacement, restoring the base file.
+  git read-tree main
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+
+  # Choosing A keeps its rename while still accepting B's non-conflicting
+  # children at the now-vacant source path.
+  IFS= read -r -d '' merged_tree_id <A-B.merge-info
+  git read-tree "$merged_tree_id"
+  make_resolve_tree ours A B
+
+  # Choosing B rejects A's rename and keeps B's replacement directory.
   git read-tree B
   make_resolve_tree ours B A
 )

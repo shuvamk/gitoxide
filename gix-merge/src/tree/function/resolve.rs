@@ -529,6 +529,19 @@ where
                             }
                             (
                                 Change::Rewrite { .. },
+                                Change::Addition {
+                                    relation: Some(_), ..
+                                },
+                            ) if matches!(match_kind, Some(MatchKind::EraseLeaf))
+                                && needs_tree_insertion.is_none()
+                                && !matches!(tree_conflicts, Some(ResolveWith::Ancestor)) =>
+                            {
+                                // Let the replacement's parent deletion resolve the rename first.
+                                // The deferred child then ignores this already-handled rewrite.
+                                push_deferred((theirs.clone(), Some(ours_idx)), their_changes);
+                            }
+                            (
+                                Change::Rewrite { .. },
                                 Change::Addition { .. },
                             ) if matches!(match_kind, Some(MatchKind::EraseLeaf))
                                 && rewritten_location.is_some() =>
