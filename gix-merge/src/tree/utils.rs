@@ -243,6 +243,15 @@ enum ChangeState {
     Applied,
 }
 
+/// How handling a change affected the output editor.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ChangeDisposition {
+    /// The change was consumed without applying its effect.
+    Processed,
+    /// The change's effect is represented in the editor.
+    Applied,
+}
+
 impl TrackedChange {
     pub(super) fn new(
         inner: Change,
@@ -282,6 +291,14 @@ impl TrackedChange {
     /// Record that this change's effect is represented in the output editor.
     pub(super) fn mark_applied(&mut self) {
         self.state = ChangeState::Applied;
+    }
+
+    /// Record the final disposition chosen while resolving this change.
+    pub(super) fn mark(&mut self, disposition: ChangeDisposition) {
+        match disposition {
+            ChangeDisposition::Processed => self.mark_processed(),
+            ChangeDisposition::Applied => self.mark_applied(),
+        }
     }
 }
 
