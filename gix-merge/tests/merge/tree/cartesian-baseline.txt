@@ -14,16 +14,16 @@ Ancestor resolution, early exit, and disabled rename detection are evaluated ind
 Exact-tree inverse differences include directional conflict-marker ordering; shape, conflict, and payload
 symmetry distinguish those presentation differences from structural or content loss.
 
-Git/gix exact tree agreement: 210/210
-Git/gix path-and-mode agreement: 210/210
+Git/gix exact tree agreement: 204/210
+Git/gix path-and-mode agreement: 204/210
 Git/gix unresolved-conflict agreement: 210/210
 Git/gix unique-payload agreement: 240/240
 Git unresolved directional merges: 86/210
 gix unresolved directional merges: 86/210
 Git inverse exact-tree symmetry: 89/105
-gix inverse exact-tree symmetry: 89/105
+gix inverse exact-tree symmetry: 86/105
 Git inverse path-and-mode symmetry: 105/105
-gix inverse path-and-mode symmetry: 105/105
+gix inverse path-and-mode symmetry: 102/105
 Git inverse conflict symmetry: 105/105
 gix inverse conflict symmetry: 105/105
 Git inverse payload symmetry: 105/105
@@ -50,8 +50,10 @@ gix no-rewrites inverse conflict symmetry: 105/105
 gix no-rewrites inverse payload symmetry: 105/105
 gix no-rewrites clean-oracle passes: 53/53
 
-## Git/gix differences (0)
-- none
+## Git/gix differences (3)
+- rename-free-a + file-to-dir: A+B:tree, A+B:shape, B+A:tree, B+A:shape
+- rename-free-b + file-to-dir: A+B:tree, A+B:shape, B+A:tree, B+A:shape
+- rename-modify-free-a + file-to-dir: A+B:tree, A+B:shape, B+A:tree, B+A:shape
 
 ## Git inverse exact-tree differences (16)
 - modify-source + modify-source
@@ -71,13 +73,16 @@ gix no-rewrites clean-oracle passes: 53/53
 - file-to-dir + rename-and-file-to-dir
 - rename-and-file-to-dir + rename-and-file-to-dir
 
-## gix inverse exact-tree differences (16)
+## gix inverse exact-tree differences (19)
 - modify-source + modify-source
 - modify-source + rename-modify-free-a
 - rename-free-a + add-free-a
+- rename-free-a + file-to-dir
 - rename-free-b + add-free-b
+- rename-free-b + file-to-dir
 - rename-modify-free-a + rename-modify-free-a
 - rename-modify-free-a + add-free-a
+- rename-modify-free-a + file-to-dir
 - add-free-a + add-free-a
 - add-free-b + add-free-b
 - modify-occupied + modify-occupied
@@ -92,8 +97,10 @@ gix no-rewrites clean-oracle passes: 53/53
 ## Git inverse path-and-mode differences (0)
 - none
 
-## gix inverse path-and-mode differences (0)
-- none
+## gix inverse path-and-mode differences (3)
+- rename-free-a + file-to-dir
+- rename-free-b + file-to-dir
+- rename-modify-free-a + file-to-dir
 
 ## Git inverse conflict differences (0)
 - none

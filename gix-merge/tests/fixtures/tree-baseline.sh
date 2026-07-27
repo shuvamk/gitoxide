@@ -1630,6 +1630,34 @@ git init directory-rename-vs-renamed-file-replacement
   git commit -m "replace the directory with a renamed file"
 )
 
+git init unrelated-renames-overlapping-destinations
+(cd unrelated-renames-overlapping-destinations
+  mkdir -p a/a h/b
+  write_lines first >a/a/a
+  write_lines second >h/b/a
+  git add .
+  git commit -m "two files in separate directories"
+
+  git branch A
+  git branch B
+
+  # A's directory rename places `h/b/a` below `c`. B independently renames
+  # `a/a/a` to the non-tree `c` and renames `h/b/a` elsewhere. The two rename
+  # destinations therefore overlap even though their source files are unrelated.
+  git checkout A
+  git mv h c
+  git commit -m "rename h to c"
+
+  git checkout B
+  git mv h/b/a moved-h
+  git mv a/a/a moved-a
+  rmdir a/a
+  mkdir -p a
+  git mv moved-h a/a
+  git mv moved-a c
+  git commit -m "rename both files to crossing destinations"
+)
+
 git init type-change-to-symlink
 (cd type-change-to-symlink
   touch a b link
@@ -1729,6 +1757,7 @@ baseline modified-file-vs-gitlink-directory A-B A B
 baseline relocated-addition-blocked-by-rename A-B A B
 baseline directory-rename-vs-directory-to-file A-B A B
 baseline directory-rename-vs-renamed-file-replacement A-B A B
+baseline unrelated-renames-overlapping-destinations A-B A B
 baseline type-change-to-symlink A-B A B
 
 ##
@@ -1843,6 +1872,19 @@ EOF
 
   # Choosing ours keeps precisely the directory rename or file replacement selected
   # by the merge direction.
+  git read-tree A
+  make_resolve_tree ours A B
+  git read-tree B
+  make_resolve_tree ours B A
+)
+
+(cd unrelated-renames-overlapping-destinations
+  # Ancestor rejects the conflicting rename destinations and keeps both base files.
+  git read-tree main
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+
+  # Choosing ours keeps the complete side selected by the merge direction.
   git read-tree A
   make_resolve_tree ours A B
   git read-tree B

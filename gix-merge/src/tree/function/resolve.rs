@@ -541,6 +541,69 @@ where
                                 theirs_disposition = ChangeDisposition::Applied;
                             }
                             (
+                                Change::Rewrite {
+                                    source_location,
+                                    entry_mode: blocking_mode,
+                                    id: blocking_id,
+                                    location: blocking_location,
+                                    ..
+                                },
+                                Change::Addition { .. },
+                            ) if matches!(match_kind, Some(MatchKind::EraseLeaf)) => {
+                                let renamed_location = unique_path_in_tree(
+                                    blocking_location.as_bstr(),
+                                    &editor,
+                                    our_tree,
+                                    labels.current.unwrap_or_default(),
+                                )?;
+                                let conflict = Conflict::without_resolution(
+                                    ResolutionFailure::OursDirectoryTheirsNonDirectoryTheirsRenamed {
+                                        renamed_unique_path_of_theirs: renamed_location.clone(),
+                                    },
+                                    (ours, theirs, Swapped, outer_side),
+                                    [
+                                        None,
+                                        None,
+                                        index_entry_at_path(
+                                            blocking_mode,
+                                            blocking_id,
+                                            ConflictIndexEntryPathHint::RenamedOrTheirs,
+                                        ),
+                                    ],
+                                );
+
+                                match tree_conflicts {
+                                    None => {
+                                        editor.remove(toc(source_location))?;
+                                        editor.remove(toc(blocking_location))?;
+                                        our_tree.remove_existing_change(blocking_location.as_bstr());
+                                        editor.upsert(
+                                            toc(&renamed_location),
+                                            blocking_mode.kind(),
+                                            *blocking_id,
+                                        )?;
+                                        apply_change(&mut editor, theirs, None)?;
+                                        ours_disposition = ChangeDisposition::Applied;
+                                        theirs_disposition = ChangeDisposition::Applied;
+                                    }
+                                    Some(ResolveWith::Ours) => match outer_side {
+                                        Original => {
+                                            apply_change(&mut editor, ours, None)?;
+                                            ours_disposition = ChangeDisposition::Applied;
+                                        }
+                                        Swapped => {
+                                            apply_change(&mut editor, theirs, None)?;
+                                            theirs_disposition = ChangeDisposition::Applied;
+                                        }
+                                    },
+                                    Some(ResolveWith::Ancestor) => {}
+                                }
+
+                                if should_fail_on_conflict(conflict) {
+                                    break 'outer;
+                                }
+                            }
+                            (
                                 Change::Addition {
                                     location: blocking_location,
                                     entry_mode: blocking_mode,
@@ -907,6 +970,70 @@ where
                             }
                             (
                                 Change::Rewrite {
+                                    entry_mode: tree_mode,
+                                    location: tree_location,
+                                    ..
+                                },
+                                Change::Rewrite {
+                                    source_location,
+                                    entry_mode,
+                                    id,
+                                    location,
+                                    ..
+                                },
+                            ) if tree_mode.is_tree() && tree_location == location => {
+                                let renamed_location = unique_path_in_tree(
+                                    location.as_bstr(),
+                                    &editor,
+                                    our_tree,
+                                    labels.other.unwrap_or_default(),
+                                )?;
+                                let conflict = Conflict::without_resolution(
+                                    ResolutionFailure::OursDirectoryTheirsNonDirectoryTheirsRenamed {
+                                        renamed_unique_path_of_theirs: renamed_location.clone(),
+                                    },
+                                    (ours, theirs, Original, outer_side),
+                                    [
+                                        None,
+                                        None,
+                                        index_entry_at_path(
+                                            entry_mode,
+                                            id,
+                                            ConflictIndexEntryPathHint::RenamedOrTheirs,
+                                        ),
+                                    ],
+                                );
+
+                                match tree_conflicts {
+                                    None => {
+                                        editor.remove(toc(source_location))?;
+                                        editor.upsert(toc(&renamed_location), entry_mode.kind(), *id)?;
+                                        their_tree.remove_existing_change(location.as_bstr());
+                                        ours_disposition = ChangeDisposition::Applied;
+                                        theirs_disposition = ChangeDisposition::Applied;
+                                    }
+                                    Some(ResolveWith::Ours) => {
+                                        apply_our_resolution(ours, theirs, outer_side, &mut editor)?;
+                                        match outer_side {
+                                            Original => {
+                                                their_tree.remove_existing_change(location.as_bstr());
+                                                ours_disposition = ChangeDisposition::Applied;
+                                            }
+                                            Swapped => {
+                                                our_tree.remove_existing_change(tree_location.as_bstr());
+                                                theirs_disposition = ChangeDisposition::Applied;
+                                            }
+                                        }
+                                    }
+                                    Some(ResolveWith::Ancestor) => {}
+                                }
+
+                                if should_fail_on_conflict(conflict) {
+                                    break 'outer;
+                                }
+                            }
+                            (
+                                Change::Rewrite {
                                     source_location,
                                     entry_mode: tree_mode,
                                     ..
@@ -1077,6 +1204,76 @@ where
                                         }
                                     },
                                     Some(ResolveWith::Ancestor) => {}
+                                }
+                            }
+                            (
+                                Change::Rewrite {
+                                    source_location: blocking_source,
+                                    entry_mode: blocking_mode,
+                                    id: blocking_id,
+                                    location: blocking_location,
+                                    ..
+                                },
+                                Change::Rewrite {
+                                    source_location: nested_source,
+                                    ..
+                                },
+                            ) if blocking_source != nested_source
+                                && matches!(match_kind, Some(MatchKind::EraseLeaf)) =>
+                            {
+                                // These are unrelated renames whose destinations form a file/directory
+                                // conflict. Keep the directory at its intended path and move the blocking file.
+                                let renamed_location = unique_path_in_tree(
+                                    blocking_location.as_bstr(),
+                                    &editor,
+                                    our_tree,
+                                    labels.current.unwrap_or_default(),
+                                )?;
+                                let conflict = Conflict::without_resolution(
+                                    ResolutionFailure::OursDirectoryTheirsNonDirectoryTheirsRenamed {
+                                        renamed_unique_path_of_theirs: renamed_location.clone(),
+                                    },
+                                    (ours, theirs, Swapped, outer_side),
+                                    [
+                                        None,
+                                        None,
+                                        index_entry_at_path(
+                                            blocking_mode,
+                                            blocking_id,
+                                            ConflictIndexEntryPathHint::RenamedOrTheirs,
+                                        ),
+                                    ],
+                                );
+
+                                match tree_conflicts {
+                                    None => {
+                                        editor.remove(toc(blocking_source))?;
+                                        editor.remove(toc(blocking_location))?;
+                                        our_tree.remove_existing_change(blocking_location.as_bstr());
+                                        editor.upsert(
+                                            toc(&renamed_location),
+                                            blocking_mode.kind(),
+                                            *blocking_id,
+                                        )?;
+                                        apply_change(&mut editor, theirs, None)?;
+                                        ours_disposition = ChangeDisposition::Applied;
+                                        theirs_disposition = ChangeDisposition::Applied;
+                                    }
+                                    Some(ResolveWith::Ours) => match outer_side {
+                                        Original => {
+                                            apply_change(&mut editor, ours, None)?;
+                                            ours_disposition = ChangeDisposition::Applied;
+                                        }
+                                        Swapped => {
+                                            apply_change(&mut editor, theirs, None)?;
+                                            theirs_disposition = ChangeDisposition::Applied;
+                                        }
+                                    },
+                                    Some(ResolveWith::Ancestor) => {}
+                                }
+
+                                if should_fail_on_conflict(conflict) {
+                                    break 'outer;
                                 }
                             }
                             (
