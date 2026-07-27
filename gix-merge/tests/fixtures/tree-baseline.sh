@@ -1593,6 +1593,52 @@ git init gitlink-vs-renamed-symlink-directory-with-siblings
   git commit -m "expected reversed gix merge"
 )
 
+git init same-source-rewrites-after-consumed-path
+(cd same-source-rewrites-after-consumed-path
+  mkdir -p a/a
+  printf payload >a/a/a
+  printf payload >b
+  git add .
+  git commit -m "identical files at nested and root paths"
+
+  git branch A
+  git branch B
+
+  # Every non-directory entry deliberately has the same object ID. This gives
+  # rewrite detection several equally valid source/destination pairings. A
+  # removes `a/a/a` and reuses its payload at unrelated paths.
+  git checkout A
+  git rm a/a/a
+  mkdir -p e/a g/e
+  ln -s payload e/a/g
+  printf payload >g/e/a
+  git add .
+  git commit -m "remove the nested source and add identical entries"
+
+  # B retains `a/a/a`, adds an executable sibling, replaces `b` with a nested
+  # copy, and adds another copy. Resolving one ambiguous rewrite can consume
+  # the shared source before a later same-source rewrite cleans it up.
+  git checkout B
+  mkdir -p a/e h/e
+  printf payload >a/e/a
+  chmod +x a/e/a
+  git rm b
+  mkdir -p b/b
+  printf payload >b/b/f
+  printf payload >h/e/a
+  git add .
+  git commit -m "retain and multiply the identical payload"
+
+  # gix pairs both sides with the same ambiguous base source and carries B's
+  # executable mode to A's destination. Git leaves both additions in place.
+  git checkout -b expected B
+  git update-index --force-remove a/a/a
+  git update-index --force-remove a/e/a
+  git update-index --add --cacheinfo "120000,$(git rev-parse A:e/a/g),e/a/g"
+  git update-index --add --cacheinfo "100755,$(git rev-parse B:a/e/a),g/e/a"
+  git commit -m "expected gix merge"
+)
+
 git init modified-file-vs-gitlink-directory
 (cd modified-file-vs-gitlink-directory
   ln -s target a
@@ -1900,6 +1946,7 @@ baseline symlink-addition A-B A B
 baseline added-file-vs-added-directory A-B A B
 baseline added-symlink-blocks-gitlink-directory A-B A B
 baseline gitlink-vs-renamed-symlink-directory-with-siblings A-B A B "gix relocates A's addition through the detected directory rename, while Git keeps it at its original path"
+baseline same-source-rewrites-after-consumed-path A-B A B "ambiguous identical blobs make gix pair both sides with one base source, while Git retains both additions"
 baseline modified-file-vs-gitlink-directory A-B A B
 baseline relocated-addition-blocked-by-rename A-B A B
 baseline directory-rename-vs-directory-to-file A-B A B

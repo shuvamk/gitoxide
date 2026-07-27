@@ -1414,8 +1414,8 @@ where
 
                                 if matches!(tree_conflicts, None | Some(ResolveWith::Ours)) {
                                     editor.remove(toc(source_location))?;
-                                    our_tree.remove_existing_change(source_location.as_bstr());
-                                    their_tree.remove_existing_change(source_location.as_bstr());
+                                    our_tree.remove_change(source_location.as_bstr());
+                                    their_tree.remove_change(source_location.as_bstr());
                                 }
 
                                 let their_location =
