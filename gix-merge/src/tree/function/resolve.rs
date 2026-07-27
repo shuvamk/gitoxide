@@ -589,7 +589,7 @@ where
                                     None => {
                                         editor.remove(toc(source_location))?;
                                         editor.remove(toc(blocking_location))?;
-                                        our_tree.remove_existing_change(blocking_location.as_bstr());
+                                        our_tree.remove_change(blocking_location.as_bstr());
                                         editor.upsert(
                                             toc(&renamed_location),
                                             blocking_mode.kind(),
@@ -653,7 +653,7 @@ where
                                 match tree_conflicts {
                                     None => {
                                         editor.remove(toc(blocking_location))?;
-                                        our_tree.remove_existing_change(blocking_location.as_bstr());
+                                        our_tree.remove_change(blocking_location.as_bstr());
                                         editor.upsert(
                                             toc(&renamed_location),
                                             blocking_mode.kind(),
@@ -670,7 +670,7 @@ where
                                         }
                                         Swapped => {
                                             editor.remove(toc(blocking_location))?;
-                                            our_tree.remove_existing_change(blocking_location.as_bstr());
+                                            our_tree.remove_change(blocking_location.as_bstr());
                                             apply_change(&mut editor, theirs, None)?;
                                             theirs_disposition = ChangeDisposition::Applied;
                                         }
@@ -1347,7 +1347,7 @@ where
                                     None => {
                                         editor.remove(toc(blocking_source))?;
                                         editor.remove(toc(blocking_location))?;
-                                        our_tree.remove_existing_change(blocking_location.as_bstr());
+                                        our_tree.remove_change(blocking_location.as_bstr());
                                         editor.upsert(toc(&renamed_location), blocking_mode.kind(), *blocking_id)?;
                                         apply_change(&mut editor, theirs, None)?;
                                         ours_disposition = ChangeDisposition::Applied;
