@@ -198,6 +198,7 @@ pub(crate) struct App {
     pub inline: bool,
     pub preview_author_copy: bool,
     reachability_anchor: Option<ObjectId>,
+    junction_parent: Option<usize>,
     reachable_rows: Option<Vec<bool>>,
     pub copy_feedback: Option<CopyKind>,
     pub estimated_lane_width: usize,
@@ -238,6 +239,7 @@ impl App {
             inline: false,
             preview_author_copy: false,
             reachability_anchor: None,
+            junction_parent: None,
             reachable_rows: None,
             copy_feedback: None,
             estimated_lane_width: 0,
@@ -354,13 +356,17 @@ impl App {
             Action::MoveUp => self.move_reachable(false),
             Action::MoveDown => self.move_reachable(true),
             Action::ScrollLeft => {
-                self.horizontal_offset = self.horizontal_offset.saturating_sub(self.horizontal_page);
+                if !self.cycle_junction_parent(false) {
+                    self.horizontal_offset = self.horizontal_offset.saturating_sub(self.horizontal_page);
+                }
             }
             Action::ScrollRight => {
-                self.horizontal_offset = self
-                    .horizontal_offset
-                    .saturating_add(self.horizontal_page)
-                    .min(self.horizontal_max);
+                if !self.cycle_junction_parent(true) {
+                    self.horizontal_offset = self
+                        .horizontal_offset
+                        .saturating_add(self.horizontal_page)
+                        .min(self.horizontal_max);
+                }
             }
             Action::HalfPageUp => self.move_selection((self.viewport_rows / 2).max(1), false),
             Action::HalfPageDown => self.move_selection((self.viewport_rows / 2).max(1), true),
@@ -429,6 +435,7 @@ impl App {
                     self.compute_reachable_rows();
                 } else if !value {
                     self.reachability_anchor = None;
+                    self.junction_parent = None;
                     self.reachable_rows = None;
                 }
                 self.preview_author_copy = value;
@@ -547,6 +554,7 @@ impl App {
         self.follow_tail = false;
         self.preview_author_copy = false;
         self.reachability_anchor = None;
+        self.junction_parent = None;
         self.reachable_rows = None;
         self.signature_failures = 0;
         self.signature_verification_running = false;
@@ -598,6 +606,28 @@ impl App {
         }
     }
 
+    fn cycle_junction_parent(&mut self, forward: bool) -> bool {
+        if self.state != State::Complete {
+            return false;
+        }
+        let Some(parent_count) = self
+            .reachability_anchor
+            .and_then(|anchor| self.rows.iter().find(|row| row.id == anchor))
+            .map(|row| row.parent_ids.len())
+            .filter(|count| *count > 1)
+        else {
+            return false;
+        };
+        let current = self.junction_parent.unwrap_or(1);
+        self.junction_parent = Some(if forward {
+            (current + 1) % parent_count
+        } else {
+            (current + parent_count - 1) % parent_count
+        });
+        self.compute_reachable_rows();
+        true
+    }
+
     fn compute_reachable_rows(&mut self) {
         if self.state != State::Complete {
             self.reachable_rows = None;
@@ -607,52 +637,50 @@ impl App {
             self.reachable_rows = None;
             return;
         };
-        let ancestors_of = |start| {
-            let mut pending = HashSet::from([start]);
-            self.rows
-                .iter()
-                .map(|row| {
-                    let reachable = pending.remove(&row.id);
-                    if reachable {
-                        pending.extend(row.parent_ids.iter().copied());
-                    }
-                    reachable
-                })
-                .collect::<Vec<_>>()
-        };
-        let reachable = ancestors_of(anchor);
-        let Some(mut parents) = self
-            .rows
-            .iter()
-            .find(|row| row.id == anchor && row.parent_ids.len() > 1)
-            .map(|row| row.parent_ids.iter().copied())
-        else {
-            self.reachable_rows = Some(reachable);
+        let Some(anchor_index) = self.rows.iter().position(|row| row.id == anchor) else {
+            self.reachable_rows = Some(vec![false; self.rows.len()]);
             return;
         };
-        let first_parent = ancestors_of(parents.next().expect("a merge has a first parent"));
-        let mut merge_bases = vec![false; self.rows.len()];
-        for parent in parents {
-            let other_parent = ancestors_of(parent);
-            let mut covered = HashSet::new();
-            for (index, row) in self.rows.iter().enumerate() {
-                let covered_by_newer_base = covered.remove(&row.id);
-                if covered_by_newer_base || first_parent[index] && other_parent[index] {
-                    if !covered_by_newer_base {
-                        merge_bases[index] = true;
-                    }
-                    covered.extend(row.parent_ids.iter().copied());
-                }
+        let parent_count = self.rows[anchor_index].parent_ids.len();
+        let start = if parent_count > 1 {
+            let parent = self.junction_parent.get_or_insert(1);
+            if *parent >= parent_count {
+                *parent = 1;
             }
+            self.rows[anchor_index]
+                .parent_ids
+                .get(*parent)
+                .copied()
+                .expect("the selected junction parent exists")
+        } else {
+            self.junction_parent = None;
+            anchor
+        };
+        let mut pending = HashSet::from([start]);
+        let mut reachable: Vec<_> = self
+            .rows
+            .iter()
+            .map(|row| {
+                let reachable = pending.remove(&row.id);
+                if reachable {
+                    pending.extend(row.parent_ids.iter().copied());
+                }
+                reachable
+            })
+            .collect();
+        if start != anchor {
+            reachable[anchor_index] = true;
         }
-        self.reachable_rows = Some(
-            reachable
-                .into_iter()
-                .zip(first_parent)
-                .zip(merge_bases)
-                .map(|((reachable, first_parent), merge_base)| reachable && !first_parent || merge_base)
-                .collect(),
-        );
+        self.reachable_rows = Some(reachable);
+    }
+
+    pub(crate) fn junction_parent(&self, index: usize) -> Option<usize> {
+        let row = self.rows.get(index)?;
+        if self.reachability_anchor == Some(row.id) {
+            self.junction_parent.map(|parent| parent + 1)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn is_row_reachable(&self, index: usize) -> bool {
@@ -1268,7 +1296,7 @@ mod tests {
     #[test]
     fn shift_defers_reachability_until_the_graph_is_complete() {
         let mut app = App::new(4);
-        app.extend_commits(vec![row_with_parents(4, &[3]), row_with_parents(3, &[2])]);
+        app.extend_commits(vec![row_with_parents(4, &[3, 2]), row_with_parents(3, &[1])]);
 
         app.update(Action::PreviewAuthorCopy(true));
         assert!(
@@ -1286,6 +1314,7 @@ mod tests {
             app.reachable_rows.is_some(),
             "graph completion computes reachability once"
         );
+        assert_eq!(app.junction_parent(0), Some(2));
     }
 
     #[test]
@@ -1482,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_excludes_a_merges_first_parent_history() {
+    fn shift_starts_with_a_merges_second_parent_rail() {
         let mut app = App::new(7);
         app.extend_commits(vec![
             row_with_parents(6, &[5, 4]),
@@ -1506,39 +1535,59 @@ mod tests {
         assert_eq!(
             reachable,
             [id(6), id(4), id(2), id(1)],
-            "the merge side excludes first-parent history except for its fork point"
+            "the second parent and its complete ancestry are reachable"
         );
     }
 
     #[test]
-    fn shift_includes_each_other_parents_best_merge_bases() {
-        let mut app = App::new(9);
+    fn shift_cycles_junction_parents_without_panning() {
+        let mut app = App::new(8);
         app.extend_commits(vec![
             row_with_parents(10, &[8, 9, 11]),
-            row_with_parents(8, &[6, 7]),
+            row_with_parents(8, &[6]),
             row_with_parents(9, &[7, 6]),
             row_with_parents(11, &[5]),
-            row_with_parents(7, &[5]),
-            row_with_parents(6, &[5]),
+            row_with_parents(7, &[1]),
+            row_with_parents(6, &[1]),
             row_with_parents(5, &[1]),
             row(1),
         ]);
         complete(&mut app);
         app.selected = app.rows.iter().position(|row| row.id == id(10));
+        app.set_horizontal_bounds(10, 25);
 
         app.update(Action::PreviewAuthorCopy(true));
-        let reachable: HashSet<_> = app
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| app.is_row_reachable(*index))
-            .map(|(_, row)| row.id)
-            .collect();
+        let reachable = |app: &App| {
+            app.rows
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| app.is_row_reachable(*index))
+                .map(|(_, row)| row.id)
+                .collect::<HashSet<_>>()
+        };
+        assert_eq!(app.junction_parent(0), Some(2));
         assert_eq!(
-            reachable,
-            HashSet::from([id(10), id(9), id(11), id(7), id(6), id(5)]),
-            "all best pairwise merge bases are included, but their older shared ancestor is not"
+            reachable(&app),
+            HashSet::from([id(10), id(9), id(7), id(6), id(1)]),
+            "the selected rail traverses every parent of its next junction"
         );
+
+        app.update(Action::ScrollRight);
+        assert_eq!(app.junction_parent(0), Some(3));
+        assert_eq!(reachable(&app), HashSet::from([id(10), id(11), id(5), id(1)]));
+        app.update(Action::ScrollRight);
+        assert_eq!(app.junction_parent(0), Some(1));
+        assert_eq!(reachable(&app), HashSet::from([id(10), id(8), id(6), id(1)]));
+        app.update(Action::ScrollLeft);
+        assert_eq!(app.junction_parent(0), Some(3));
+        assert_eq!(
+            app.horizontal_offset, 0,
+            "junction selection suppresses horizontal panning"
+        );
+
+        app.update(Action::PreviewAuthorCopy(false));
+        app.update(Action::ScrollRight);
+        assert_eq!(app.horizontal_offset, 10, "releasing Shift restores horizontal panning");
     }
 
     #[test]
