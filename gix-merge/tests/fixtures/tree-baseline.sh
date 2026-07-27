@@ -1658,6 +1658,34 @@ git init unrelated-renames-overlapping-destinations
   git commit -m "rename both files to crossing destinations"
 )
 
+git init renamed-file-inside-renamed-directory
+(cd renamed-file-inside-renamed-directory
+  mkdir -p a/a h/b
+  write_lines first >a/a/a
+  write_lines second >h/b/a
+  git add .
+  git commit -m "two files in separate directories"
+
+  git branch A
+  git branch B
+
+  # A renames `h` to `c`. B replaces the contents of `h` with a file renamed
+  # from elsewhere while moving the original `h/b/a` to `a/a`. Directory-rename
+  # handling must therefore defer and relocate a rewrite, not just an addition.
+  git checkout A
+  git mv h c
+  git commit -m "rename h to c"
+
+  git checkout B
+  git mv h/b/a moved-h
+  git mv a/a/a moved-a
+  rmdir a/a h/b h
+  mkdir -p a h
+  git mv moved-h a/a
+  git mv moved-a h/h
+  git commit -m "replace a renamed directory with an outside file"
+)
+
 git init type-change-to-symlink
 (cd type-change-to-symlink
   touch a b link
@@ -1758,6 +1786,7 @@ baseline relocated-addition-blocked-by-rename A-B A B
 baseline directory-rename-vs-directory-to-file A-B A B
 baseline directory-rename-vs-renamed-file-replacement A-B A B
 baseline unrelated-renames-overlapping-destinations A-B A B
+baseline renamed-file-inside-renamed-directory A-B A B
 baseline type-change-to-symlink A-B A B
 
 ##
@@ -1888,6 +1917,50 @@ EOF
   git read-tree A
   make_resolve_tree ours A B
   git read-tree B
+  make_resolve_tree ours B A
+)
+
+(cd renamed-file-inside-renamed-directory
+  # Git puts the relocated `c/h` into stages 1, 2, and 3 even though all three
+  # entries are identical. gix records the successful directory relocation as
+  # stage 0 and reserves conflict stages for the genuinely divergent rename.
+  rm .git/index
+  git update-index --index-info <<EOF
+100644 blob $(git rev-parse main:h/b/a) 3	a/a
+100644 blob $(git rev-parse main:h/b/a) 2	c/b/a
+100644 blob $(git rev-parse main:a/a/a)	c/h
+100644 blob $(git rev-parse main:h/b/a) 1	h/b/a
+EOF
+  make_conflict_index renamed-file-inside-renamed-directory-A-B
+
+  rm .git/index
+  git update-index --index-info <<EOF
+100644 blob $(git rev-parse main:h/b/a) 2	a/a
+100644 blob $(git rev-parse main:h/b/a) 3	c/b/a
+100644 blob $(git rev-parse main:a/a/a)	c/h
+100644 blob $(git rev-parse main:h/b/a) 1	h/b/a
+EOF
+  make_conflict_index renamed-file-inside-renamed-directory-A-B-reversed
+
+  # Ancestor rejects the divergent rename of `h/b/a`, but the separate file
+  # rename is cleanly relocated through A's directory rename to `c/h`.
+  git read-tree main
+  git update-index --force-remove a/a/a
+  git update-index --add --cacheinfo "100644,$(git rev-parse main:a/a/a),c/h"
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+
+  # Choosing A still retains the independently relocated file from B.
+  git read-tree A
+  git update-index --force-remove a/a/a
+  git update-index --add --cacheinfo "100644,$(git rev-parse main:a/a/a),c/h"
+  make_resolve_tree ours A B
+
+  # Choosing B keeps B's divergent rename, while the other file still follows
+  # the independently resolved directory relocation.
+  git read-tree B
+  git update-index --force-remove h/h
+  git update-index --add --cacheinfo "100644,$(git rev-parse main:a/a/a),c/h"
   make_resolve_tree ours B A
 )
 

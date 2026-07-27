@@ -627,8 +627,11 @@ impl TreeNodes {
         }
     }
 
-    /// Insert `new_change` which affects this tree into it and put it into `storage` to obtain the index.
-    /// Panic if that change already exists as it must be made so that it definitely doesn't overlap with this tree.
+    /// Insert the current location of a newly deferred change into this tree.
+    ///
+    /// A rewrite may arrive here after directory-rename handling deferred it to a relocated
+    /// destination. Its source is already represented by the original change tree; only the
+    /// rescheduled destination must become visible now.
     pub fn insert(&mut self, new_change: &Change, new_change_idx: usize) {
         let mut next_index = self.0.len();
         let mut cursor = &mut self.0[0];
@@ -646,10 +649,6 @@ impl TreeNodes {
             }
         }
 
-        debug_assert!(
-            !matches!(new_change, Change::Rewrite { .. }),
-            "BUG: we thought we wouldn't do that current.location is related?"
-        );
         cursor.change_idx = Some(new_change_idx);
         cursor.change_is_tree = new_change.entry_mode().is_tree();
         cursor.location = ChangeLocation::CurrentLocation;
