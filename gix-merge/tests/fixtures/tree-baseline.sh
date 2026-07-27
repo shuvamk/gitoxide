@@ -1669,6 +1669,101 @@ git init same-source-rewrites-after-consumed-path
   git commit -m "expected gix merge"
 )
 
+git init rename-delete-after-consumed-path
+(cd rename-delete-after-consumed-path
+  mkdir -p a h/d f e/f
+  write_lines shared >a/a
+  chmod +x a/a
+  write_lines four >b
+  write_lines seven >e/f/a
+  chmod +x e/f/a
+  write_lines shared >f/a
+  write_lines shared >h/d/a
+  git add .
+  git commit -m "base with repeated rename candidates"
+
+  git branch A
+  git branch B
+
+  # A moves `h/d/a` below `a`, turns `f/a` into `f`, and replaces `e/`.
+  # The repeated `shared` payload deliberately gives rename detection several
+  # possible sources, matching the scheduling ambiguity found by the fuzzer.
+  git checkout A
+  git rm -r a e
+  mkdir -p a/a a/d
+  write_lines four >a/a/a
+  git mv h/d/a a/d/a
+  mv f/a moved
+  rmdir f
+  mv moved f
+  write_lines five >d
+  write_lines shared >e
+  git add -A
+  git commit -m "rename repeated payloads and replace directories"
+
+  # B deletes A's rename source and replaces `b`, `e`, and `f` with opposite
+  # file/directory shapes. Resolving another rename/delete pair can consume the
+  # path node for `h/d/a` before that pending deletion follows a directory rename.
+  git checkout B
+  git rm -r a b e f h
+  mkdir -p b/a
+  write_lines shared >b/a/a
+  write_lines four >e
+  write_lines four >f
+  git add .
+  git commit -m "delete rename sources and replace directories"
+
+  # Ambiguous identity-only rename pairing makes gix keep a smaller tree than
+  # Git and merge the repeated payloads at the surviving paths.
+  shared_four=$(
+    printf '%s\n' \
+      '<<<<<<< A' \
+      shared \
+      ======= \
+      four \
+      '>>>>>>> B' |
+      git hash-object -w --stdin
+  )
+  four_shared=$(
+    printf '%s\n' \
+      '<<<<<<< A' \
+      four \
+      ======= \
+      shared \
+      '>>>>>>> B' |
+      git hash-object -w --stdin
+  )
+  git checkout -b expected B
+  git read-tree --empty
+  git update-index --add --cacheinfo "100644,$four_shared,b/a/a"
+  git update-index --add --cacheinfo "100644,$(git rev-parse A:a/d/a),b/d/a"
+  git update-index --add --cacheinfo "100644,$(git rev-parse A:d),d"
+  git update-index --add --cacheinfo "100644,$shared_four,e"
+  git update-index --add --cacheinfo "100644,$shared_four,f"
+  git commit -m "expected gix merge"
+
+  reversed_four_shared=$(
+    printf '%s\n' \
+      '<<<<<<< B' \
+      four \
+      ======= \
+      shared \
+      '>>>>>>> A' |
+      git hash-object -w --stdin
+  )
+  # Reversing the merge exposes a pre-existing gix asymmetry: `a/a/a` and
+  # `b/a/a` remain separate instead of being content-merged at `b/a/a`.
+  git checkout -f -b expected-reversed B
+  git read-tree --empty
+  git update-index --add --cacheinfo "100644,$(git rev-parse A:a/a/a),a/a/a"
+  git update-index --add --cacheinfo "100644,$(git rev-parse B:b/a/a),b/a/a"
+  git update-index --add --cacheinfo "100644,$(git rev-parse A:a/d/a),b/d/a"
+  git update-index --add --cacheinfo "100644,$(git rev-parse A:d),d"
+  git update-index --add --cacheinfo "100644,$reversed_four_shared,e"
+  git update-index --add --cacheinfo "100644,$reversed_four_shared,f"
+  git commit -m "expected reversed gix merge"
+)
+
 git init modified-file-vs-gitlink-directory
 (cd modified-file-vs-gitlink-directory
   ln -s target a
@@ -1978,6 +2073,7 @@ baseline added-file-vs-added-directory A-B A B
 baseline added-symlink-blocks-gitlink-directory A-B A B
 baseline gitlink-vs-renamed-symlink-directory-with-siblings A-B A B "gix relocates A's addition through the detected directory rename, while Git keeps it at its original path"
 baseline same-source-rewrites-after-consumed-path A-B A B "ambiguous identical blobs make gix pair both sides with one base source, while Git retains both additions"
+baseline rename-delete-after-consumed-path A-B A B "ambiguous identical blobs make gix pair rename sources differently than Git; reversing gix also changes which repeated additions are merged"
 baseline modified-file-vs-gitlink-directory A-B A B
 baseline relocated-addition-blocked-by-rename A-B A B
 baseline directory-rename-vs-directory-to-file A-B A B
@@ -2254,6 +2350,41 @@ EOF
   # With B as ours, retain B's replacement directory.
   git read-tree B
   make_resolve_tree ours B A
+)
+
+(cd rename-delete-after-consumed-path
+  # Git associates the repeated blobs with different rename sources. Record
+  # gix's structured conflicts explicitly; the worktree tree is documented by
+  # the `expected` branches above.
+  rm .git/index
+  git update-index --index-info <<EOF
+100755 blob $(git rev-parse main:a/a) 1	a/a
+100644 blob $(git rev-parse A:a/d/a) 2	a/d/a
+100644 blob $(git rev-parse A:a/a/a) 2	b/a/a
+100644 blob $(git rev-parse B:b/a/a) 3	b/a/a
+100644 blob $(git rev-parse A:a/d/a)	b/d/a
+100644 blob $(git rev-parse A:d)	d
+100644 blob $(git rev-parse A:e) 2	e
+100644 blob $(git rev-parse B:e) 3	e
+100644 blob $(git rev-parse A:f) 2	f
+100644 blob $(git rev-parse B:f) 3	f
+EOF
+  make_conflict_index rename-delete-after-consumed-path-A-B
+
+  rm .git/index
+  git update-index --index-info <<EOF
+100755 blob $(git rev-parse main:a/a) 1	a/a
+100644 blob $(git rev-parse A:a/a/a)	a/a/a
+100644 blob $(git rev-parse A:a/d/a) 3	a/d/a
+100644 blob $(git rev-parse B:b/a/a) 2	b/a/a
+100644 blob $(git rev-parse A:a/d/a)	b/d/a
+100644 blob $(git rev-parse A:d)	d
+100644 blob $(git rev-parse B:e) 2	e
+100644 blob $(git rev-parse A:e) 3	e
+100644 blob $(git rev-parse B:f) 2	f
+100644 blob $(git rev-parse A:f) 3	f
+EOF
+  make_conflict_index rename-delete-after-consumed-path-A-B-reversed
 )
 
 (cd simple

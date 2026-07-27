@@ -198,7 +198,8 @@ where
                             let location_after_passed_rename =
                                 rewrite_location_with_renamed_directory(theirs.location(), &ours.inner);
                             if let Some(new_location) = location_after_passed_rename {
-                                their_tree.remove_existing_change(theirs.location());
+                                // Another structural conflict may already have consumed this scheduling node.
+                                their_tree.remove_change(theirs.location());
                                 push_deferred_with_rewrite(
                                     (theirs.clone(), Some(change_idx)),
                                     Some((new_location, change_idx)),

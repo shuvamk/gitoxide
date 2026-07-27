@@ -202,11 +202,11 @@ fn run_baseline() -> crate::Result {
     }
 
     assert_eq!(
-        actual_cases, 161,
+        actual_cases, 163,
         "BUG: update this number, and don't forget to remove a filter in the end"
     );
     assert_eq!(
-        skipped_tree_resolve_cases, 122,
+        skipped_tree_resolve_cases, 126,
         "this is done when no case is skipped, and we don't want to accidentally skip them.\
         Some don't actually have conflicts.\
         The ones we skipped don't have irreconcilable conflicts"
