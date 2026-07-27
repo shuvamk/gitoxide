@@ -193,6 +193,11 @@ pub(crate) fn draw(
                 .min(body.right().saturating_sub(1));
             frame.buffer_mut()[(marker_x, y)].set_style(style);
         }
+        if !app.is_row_reachable(start + index) {
+            for x in body.x..body.right() {
+                frame.buffer_mut()[(x, y)].set_style(Style::default().add_modifier(Modifier::DIM));
+            }
+        }
     }
     app.set_horizontal_bounds(content.width as usize, max_offset);
     if let (Some(area), Some(message)) = (commit_pane, commit_message) {
@@ -1355,6 +1360,39 @@ mod tests {
         assert!(
             !buffer[(23, 1)].modifier.contains(Modifier::REVERSED),
             "the final frame hides the trailing selection marker"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dims_rows_outside_the_shift_reachability_set() -> Result<(), Box<dyn std::error::Error>> {
+        let mut app = App::new(2);
+        app.extend_commits(
+            (1..=2)
+                .map(|n| Commit {
+                    id: gix::ObjectId::Sha1([n; 20]),
+                    parent_ids: Default::default(),
+                    committer_time: gix::date::Time::default(),
+                    author: author(b"author", b"author@example.com"),
+                    attributions: 0..0,
+                    title: format!("subject {n}").into(),
+                    metadata_loaded: true,
+                    signature: SignatureState::Unsigned,
+                })
+                .collect::<Vec<_>>(),
+        );
+        complete(&mut app);
+        app.update(Action::PreviewAuthorCopy(true));
+        let mut terminal = Terminal::new(TestBackend::new(80, 3))?;
+        terminal.draw(|frame| draw(frame, &mut app, &Decorations::new()))?;
+
+        assert!(
+            !terminal.backend().buffer()[(10, 0)].modifier.contains(Modifier::DIM),
+            "the anchor row remains bright"
+        );
+        assert!(
+            terminal.backend().buffer()[(10, 1)].modifier.contains(Modifier::DIM),
+            "an unreachable row is dimmed"
         );
         Ok(())
     }

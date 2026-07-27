@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Range,
     time::{Duration, Instant},
 };
@@ -197,6 +197,8 @@ pub(crate) struct App {
     pub(crate) show_selection_tail: bool,
     pub inline: bool,
     pub preview_author_copy: bool,
+    reachability_anchor: Option<ObjectId>,
+    reachable_rows: Option<Vec<bool>>,
     pub copy_feedback: Option<CopyKind>,
     pub estimated_lane_width: usize,
     pub horizontal_offset: usize,
@@ -235,6 +237,8 @@ impl App {
             show_selection_tail: true,
             inline: false,
             preview_author_copy: false,
+            reachability_anchor: None,
+            reachable_rows: None,
             copy_feedback: None,
             estimated_lane_width: 0,
             horizontal_offset: 0,
@@ -286,6 +290,9 @@ impl App {
             self.selected = Some(index);
             self.reload_selection = None;
             self.ensure_visible();
+        }
+        if self.reachability_anchor.is_some() {
+            self.compute_reachable_rows();
         }
     }
 
@@ -344,8 +351,8 @@ impl App {
     pub fn update(&mut self, action: Action) -> Vec<Effect> {
         match action {
             Action::Cancelled if self.state == State::Cancelling => self.state = State::Cancelled,
-            Action::MoveUp => self.move_selection(1, false),
-            Action::MoveDown => self.move_selection(1, true),
+            Action::MoveUp => self.move_reachable(false),
+            Action::MoveDown => self.move_reachable(true),
             Action::ScrollLeft => {
                 self.horizontal_offset = self.horizontal_offset.saturating_sub(self.horizontal_page);
             }
@@ -416,7 +423,16 @@ impl App {
                     return vec![Effect::VerifySignatures(ids)];
                 }
             }
-            Action::PreviewAuthorCopy(value) => self.preview_author_copy = value,
+            Action::PreviewAuthorCopy(value) => {
+                if value && !self.preview_author_copy {
+                    self.reachability_anchor = self.selected.and_then(|index| self.rows.get(index)).map(|row| row.id);
+                    self.compute_reachable_rows();
+                } else if !value {
+                    self.reachability_anchor = None;
+                    self.reachable_rows = None;
+                }
+                self.preview_author_copy = value;
+            }
             Action::Cancel if self.state == State::Loading => {
                 self.state = State::Cancelling;
                 return vec![Effect::Cancel];
@@ -507,6 +523,9 @@ impl App {
         self.lane_time = Some(lane_time);
         self.selected = selected.and_then(|id| self.rows.iter().position(|row| row.id == id));
         self.state = State::Complete;
+        if self.reachability_anchor.is_some() {
+            self.compute_reachable_rows();
+        }
         self.ensure_visible();
     }
 
@@ -527,6 +546,8 @@ impl App {
         self.horizontal_offset = 0;
         self.follow_tail = false;
         self.preview_author_copy = false;
+        self.reachability_anchor = None;
+        self.reachable_rows = None;
         self.signature_failures = 0;
         self.signature_verification_running = false;
     }
@@ -560,6 +581,47 @@ impl App {
         }
         self.follow_tail = false;
         self.ensure_visible();
+    }
+
+    fn move_reachable(&mut self, down: bool) {
+        let (Some(selected), Some(reachable)) = (self.selected, self.reachable_rows.as_ref()) else {
+            self.move_selection(1, down);
+            return;
+        };
+        let next = if down {
+            (selected + 1..self.rows.len()).find(|index| reachable.get(*index) == Some(&true))
+        } else {
+            (0..selected).rev().find(|index| reachable.get(*index) == Some(&true))
+        };
+        if let Some(next) = next {
+            self.select(next);
+        }
+    }
+
+    fn compute_reachable_rows(&mut self) {
+        let Some(anchor) = self.reachability_anchor else {
+            self.reachable_rows = None;
+            return;
+        };
+        let mut pending = HashSet::from([anchor]);
+        self.reachable_rows = Some(
+            self.rows
+                .iter()
+                .map(|row| {
+                    if !pending.remove(&row.id) {
+                        return false;
+                    }
+                    pending.extend(row.parent_ids.iter().copied());
+                    true
+                })
+                .collect(),
+        );
+    }
+
+    pub(crate) fn is_row_reachable(&self, index: usize) -> bool {
+        self.reachable_rows
+            .as_ref()
+            .is_none_or(|reachable| reachable.get(index).copied().unwrap_or(false))
     }
 
     fn select(&mut self, selected: usize) {
@@ -1131,6 +1193,39 @@ mod tests {
             [row(5).id, row(3).id, row(4).id, row(2).id, row(1).id],
             "topological order finishes one line before showing another"
         );
+    }
+
+    #[test]
+    fn shift_limits_jk_to_the_selected_commits_ancestors() {
+        let mut app = App::new(5);
+        app.extend_commits(vec![
+            row_with_parents(5, &[3]),
+            row_with_parents(4, &[2]),
+            row_with_parents(3, &[1]),
+            row_with_parents(2, &[1]),
+            row(1),
+        ]);
+        complete(&mut app);
+        app.selected = app.rows.iter().position(|row| row.id == id(5));
+
+        app.update(Action::PreviewAuthorCopy(true));
+        let reachable: Vec<_> = app
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| app.is_row_reachable(*index))
+            .map(|(_, row)| row.id)
+            .collect();
+        assert_eq!(reachable, [id(5), id(3), id(1)]);
+
+        app.update(Action::MoveDown);
+        assert_eq!(app.rows[app.selected.expect("an ancestor is selected")].id, id(3));
+        app.update(Action::MoveDown);
+        assert_eq!(app.rows[app.selected.expect("an ancestor is selected")].id, id(1));
+
+        app.update(Action::PreviewAuthorCopy(false));
+        app.update(Action::MoveUp);
+        assert_eq!(app.rows[app.selected.expect("normal navigation is restored")].id, id(2));
     }
 
     #[test]
