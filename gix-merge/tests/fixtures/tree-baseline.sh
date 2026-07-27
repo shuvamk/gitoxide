@@ -1508,6 +1508,30 @@ git init relocated-addition-blocked-by-rename
   git commit -m "add below renamed directory"
 )
 
+git init directory-rename-vs-directory-to-file
+(cd directory-rename-vs-directory-to-file
+  mkdir a
+  write_lines same >a/a
+  git add .
+  git commit -m "file in a"
+
+  git branch A
+  git branch B
+
+  # A renames the containing directory. B moves its only file to the directory's
+  # former path, replacing the directory with that file. This is a different-renames
+  # conflict whose tree/non-tree handling must update the rename side's path tree.
+  git checkout A
+  git mv a e
+  git commit -m "rename a to e"
+
+  git checkout B
+  git mv a/a moved
+  rmdir a
+  git mv moved a
+  git commit -m "replace a directory with its file"
+)
+
 git init type-change-to-symlink
 (cd type-change-to-symlink
   touch a b link
@@ -1602,6 +1626,7 @@ baseline symlink-addition A-B A B
 baseline added-symlink-blocks-gitlink-directory A-B A B
 baseline modified-file-vs-gitlink-directory A-B A B
 baseline relocated-addition-blocked-by-rename A-B A B
+baseline directory-rename-vs-directory-to-file A-B A B
 baseline type-change-to-symlink A-B A B
 
 ##
@@ -1648,6 +1673,20 @@ baseline type-change-to-symlink A-B A B
   IFS= read -r -d '' merged_reversed_tree_id <A-B-reversed.merge-info
   git read-tree "$merged_reversed_tree_id"
   make_resolve_tree ancestor B A
+  make_resolve_tree ours B A
+)
+
+(cd directory-rename-vs-directory-to-file
+  # Ancestor resolution applies neither rename and restores `a/a`.
+  git read-tree main
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+
+  # Choosing ours keeps precisely the directory rename or directory-to-file
+  # replacement selected by the merge direction.
+  git read-tree A
+  make_resolve_tree ours A B
+  git read-tree B
   make_resolve_tree ours B A
 )
 

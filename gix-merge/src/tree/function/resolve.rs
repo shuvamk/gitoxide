@@ -1305,7 +1305,26 @@ where
                                 } else {
                                     Swapped
                                 };
-                                if let Some(merged_mode) = merge_modes(*our_mode, *their_mode) {
+                                if our_mode.is_tree() && add_location == source_location {
+                                    // The leaf changes already represent the directory rename and its replacement.
+                                    // Keep the replacement at the explicit source instead of relocating it with
+                                    // the inferred directory rename and reporting a second conflict.
+                                    match tree_conflicts {
+                                        None => {
+                                            editor.upsert(toc(add_location), their_mode.kind(), *their_id)?;
+                                            ours_disposition = ChangeDisposition::Applied;
+                                            theirs_disposition = ChangeDisposition::Applied;
+                                        }
+                                        Some(ResolveWith::Ours) => {
+                                            apply_our_resolution(ours, theirs, outer_side, &mut editor)?;
+                                            match outer_side {
+                                                Original => ours_disposition = ChangeDisposition::Applied,
+                                                Swapped => theirs_disposition = ChangeDisposition::Applied,
+                                            }
+                                        }
+                                        Some(ResolveWith::Ancestor) => {}
+                                    }
+                                } else if let Some(merged_mode) = merge_modes(*our_mode, *their_mode) {
                                     let (merged_blob_id, resolution) = if our_id == their_id {
                                         (*our_id, None)
                                     } else {
@@ -1376,7 +1395,7 @@ where
                                             (*our_mode, *our_id, ConflictIndexEntryPathHint::Current),
                                         )
                                     };
-                                    let tree_with_rename = pick_mut(logical_side, their_tree, our_tree);
+                                    let tree_with_rename = pick_mut(side, our_tree, their_tree);
                                     let renamed_location = unique_path_in_tree(
                                         location.as_bstr(),
                                         &editor,
