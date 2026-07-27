@@ -473,6 +473,19 @@ where
                                 && merge_modes(*our_mode, *their_mode).is_some()
                                 && our_id != their_id =>
                             {
+                                let previous_is_compatible = merge_modes(*our_mode, *previous_entry_mode).is_some()
+                                    && merge_modes(*their_mode, *previous_entry_mode).is_some();
+                                let merged_mode = if previous_is_compatible {
+                                    merge_modes_prev(*our_mode, *their_mode, *previous_entry_mode)
+                                } else {
+                                    merge_modes(*our_mode, *their_mode)
+                                }
+                                .expect("the match guard assures compatible current modes");
+                                let (merge_base_id, merge_base_mode) = if previous_is_compatible {
+                                    (*previous_id, *previous_entry_mode)
+                                } else {
+                                    (previous_id.kind().null(), merged_mode)
+                                };
                                 let (merged_blob_id, resolution) = perform_blob_merge(
                                     labels,
                                     objects,
@@ -481,13 +494,10 @@ where
                                     &mut write_blob_to_odb,
                                     (location, *our_id, *our_mode),
                                     (location, *their_id, *their_mode),
-                                    (location, *previous_id, *previous_entry_mode),
+                                    (location, merge_base_id, merge_base_mode),
                                     (0, outer_side),
                                     &options,
                                 )?;
-
-                                let merged_mode = merge_modes_prev(*our_mode, *their_mode, *previous_entry_mode)
-                                    .expect("BUG: merge_modes() reports a valid mode, this one should do too");
 
                                 editor.upsert(toc(location), merged_mode.kind(), merged_blob_id)?;
                                 if should_fail_on_conflict(Conflict::with_resolution(

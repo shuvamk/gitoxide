@@ -1265,6 +1265,32 @@ EOF
   make_conflict_index submodule-both-modify-A-B-reversed
 )
 
+git init gitlink-replaced-by-files
+(cd gitlink-replaced-by-files
+  git commit --allow-empty -m "seed commit"
+  seed=$(git rev-parse HEAD)
+  git update-index --add --cacheinfo 160000,$seed,item
+  git commit -m "gitlink base"
+
+  git branch A
+  git branch B
+
+  # Both sides replace the gitlink with regular files. Their contents must be
+  # merged as an add/add pair with an empty blob ancestor; the commit named by
+  # the base entry is not a valid blob-merge resource.
+  git checkout A
+  git rm item
+  write_lines changed-by-A >item
+  git add item
+  git commit -m "replace gitlink with A's file"
+
+  git checkout B
+  git rm item
+  write_lines changed-by-B >item
+  git add item
+  git commit -m "replace gitlink with B's file"
+)
+
 git init both-modify-union-attr
 (cd both-modify-union-attr
   mkdir a && write_lines original 1 2 3 4 5 >a/x.f
@@ -1607,6 +1633,7 @@ baseline added-file-changed-content-and-mode A-B A B "We improve on executable b
 baseline type-change-and-renamed A-B A B
 baseline change-and-delete A-B A B
 baseline submodule-both-modify A-B A B "We can't handle submodules yet and just mark them as conflicting. This is planned to be improved."
+baseline gitlink-replaced-by-files A-B A B
 baseline both-modify-union-attr A-B A B
 baseline both-modify-union-attr A-B-diff3 A B
 baseline both-modify-binary A-B A B
@@ -2292,6 +2319,23 @@ EOF
   git update-index --index-info <<EOF
 160000 commit $(oid ea6eb701e03c2497915c25a851f3da8f8e362ca0)	sub
 EOF
+  make_resolve_tree ours B A
+)
+
+(cd gitlink-replaced-by-files
+  # Resolving tree conflicts with the ancestor does not resolve the content
+  # conflict, so retain Git's directional conflict-marker trees.
+  IFS= read -r -d '' merged_tree_id <A-B.merge-info
+  git read-tree "$merged_tree_id"
+  make_resolve_tree ancestor A B
+  IFS= read -r -d '' merged_reversed_tree_id <A-B-reversed.merge-info
+  git read-tree "$merged_reversed_tree_id"
+  make_resolve_tree ancestor B A
+
+  # ResolveWith::Ours also configures the blob merge to keep the current side.
+  git read-tree A
+  make_resolve_tree ours A B
+  git read-tree B
   make_resolve_tree ours B A
 )
 
