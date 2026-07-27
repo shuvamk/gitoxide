@@ -1686,6 +1686,29 @@ git init renamed-file-inside-renamed-directory
   git commit -m "replace a renamed directory with an outside file"
 )
 
+git init unrelated-renames-to-same-path-with-type-mismatch
+(cd unrelated-renames-to-same-path-with-type-mismatch
+  write_lines payload >file-source
+  ln -s payload link-source
+  git add .
+  git commit -m "regular file and symlink"
+
+  git branch A
+  git branch B
+
+  # Both sides rename a different base entry to `target`. A's entry is a
+  # symlink while B's is a regular file, so their destination cannot be
+  # content-merged. Git keeps the symlink at `target` and relocates the regular
+  # file to the side-qualified `target~B`, independently of merge direction.
+  git checkout A
+  git mv link-source target
+  git commit -m "rename the symlink to target"
+
+  git checkout B
+  git mv file-source target
+  git commit -m "rename the regular file to target"
+)
+
 git init type-change-to-symlink
 (cd type-change-to-symlink
   touch a b link
@@ -1787,6 +1810,7 @@ baseline directory-rename-vs-directory-to-file A-B A B
 baseline directory-rename-vs-renamed-file-replacement A-B A B
 baseline unrelated-renames-overlapping-destinations A-B A B
 baseline renamed-file-inside-renamed-directory A-B A B
+baseline unrelated-renames-to-same-path-with-type-mismatch A-B A B
 baseline type-change-to-symlink A-B A B
 
 ##
@@ -1961,6 +1985,19 @@ EOF
   git read-tree B
   git update-index --force-remove h/h
   git update-index --add --cacheinfo "100644,$(git rev-parse main:a/a/a),c/h"
+  make_resolve_tree ours B A
+)
+
+(cd unrelated-renames-to-same-path-with-type-mismatch
+  # Ancestor resolution rejects both incompatible destination renames.
+  git read-tree main
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+
+  # Choosing ours applies only the rename from the side named first.
+  git read-tree A
+  make_resolve_tree ours A B
+  git read-tree B
   make_resolve_tree ours B A
 )
 

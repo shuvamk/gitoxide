@@ -641,7 +641,11 @@ where
                                     None => {
                                         editor.remove(toc(blocking_location))?;
                                         our_tree.remove_existing_change(blocking_location.as_bstr());
-                                        editor.upsert(toc(&renamed_location), blocking_mode.kind(), *blocking_id)?;
+                                        editor.upsert(
+                                            toc(&renamed_location),
+                                            blocking_mode.kind(),
+                                            *blocking_id,
+                                        )?;
                                         apply_change(&mut editor, theirs, None)?;
                                         ours_disposition = ChangeDisposition::Applied;
                                         theirs_disposition = ChangeDisposition::Applied;
@@ -1077,40 +1081,93 @@ where
                                 },
                             ) if our_source_location != their_source_location
                                 && location == their_location
-                                && !involves_submodule(our_mode, their_mode)
-                                && merge_modes(*our_mode, *their_mode).is_some() =>
+                                && !involves_submodule(our_mode, their_mode) =>
                             {
                                 match tree_conflicts {
                                     None => {
-                                        let merged_mode = merge_modes(*our_mode, *their_mode)
-                                            .expect("the match guard assures compatible modes");
-                                        let (merged_blob_id, resolution) = perform_blob_merge(
-                                            labels,
-                                            objects,
-                                            blob_merge,
-                                            &mut diff_state.buf1,
-                                            &mut write_blob_to_odb,
-                                            (location, *our_id, merged_mode),
-                                            (location, *their_id, merged_mode),
-                                            (location, our_id.kind().null(), merged_mode),
-                                            (0, outer_side),
-                                            &options,
-                                        )?;
                                         editor.remove(toc(our_source_location))?;
                                         editor.remove(toc(their_source_location))?;
                                         our_tree.remove_change(our_source_location.as_bstr());
                                         their_tree.remove_change(their_source_location.as_bstr());
-                                        editor.upsert(toc(location), merged_mode.kind(), merged_blob_id)?;
-                                        if should_fail_on_conflict(Conflict::with_resolution(
-                                            Resolution::OursModifiedTheirsModifiedThenBlobContentMerge {
-                                                merged_blob: ContentMerge {
-                                                    resolution,
-                                                    merged_blob_id,
+                                        let conflict = if let Some(merged_mode) = merge_modes(*our_mode, *their_mode) {
+                                            let (merged_blob_id, resolution) = perform_blob_merge(
+                                                labels,
+                                                objects,
+                                                blob_merge,
+                                                &mut diff_state.buf1,
+                                                &mut write_blob_to_odb,
+                                                (location, *our_id, merged_mode),
+                                                (location, *their_id, merged_mode),
+                                                (location, our_id.kind().null(), merged_mode),
+                                                (0, outer_side),
+                                                &options,
+                                            )?;
+                                            editor.upsert(toc(location), merged_mode.kind(), merged_blob_id)?;
+                                            Conflict::with_resolution(
+                                                Resolution::OursModifiedTheirsModifiedThenBlobContentMerge {
+                                                    merged_blob: ContentMerge {
+                                                        resolution,
+                                                        merged_blob_id,
+                                                    },
                                                 },
-                                            },
-                                            (ours, theirs, Original, outer_side),
-                                            [None, index_entry(our_mode, our_id), index_entry(their_mode, their_id)],
-                                        )) {
+                                                (ours, theirs, Original, outer_side),
+                                                [
+                                                    None,
+                                                    index_entry(our_mode, our_id),
+                                                    index_entry(their_mode, their_id),
+                                                ],
+                                            )
+                                        } else {
+                                            // Like add/add type conflicts, retain the symlink at the contested path and
+                                            // move the regular file to a side-qualified path.
+                                            let (
+                                                logical_side,
+                                                label_of_side_to_be_moved,
+                                                (our_mode, our_id, our_path_hint),
+                                                (their_mode, their_id, their_path_hint),
+                                                moved_tree,
+                                            ) = if matches!(our_mode.kind(), EntryKind::Link | EntryKind::Tree) {
+                                                (
+                                                    Original,
+                                                    labels.other.unwrap_or_default(),
+                                                    (*our_mode, *our_id, ConflictIndexEntryPathHint::Current),
+                                                    (
+                                                        *their_mode,
+                                                        *their_id,
+                                                        ConflictIndexEntryPathHint::RenamedOrTheirs,
+                                                    ),
+                                                    &mut *their_tree,
+                                                )
+                                            } else {
+                                                (
+                                                    Swapped,
+                                                    labels.current.unwrap_or_default(),
+                                                    (*their_mode, *their_id, ConflictIndexEntryPathHint::Current),
+                                                    (*our_mode, *our_id, ConflictIndexEntryPathHint::RenamedOrTheirs),
+                                                    &mut *our_tree,
+                                                )
+                                            };
+                                            let renamed_location = unique_path_in_tree(
+                                                location.as_bstr(),
+                                                &editor,
+                                                moved_tree,
+                                                label_of_side_to_be_moved,
+                                            )?;
+                                            editor.upsert(toc(location), our_mode.kind(), our_id)?;
+                                            editor.upsert(toc(&renamed_location), their_mode.kind(), their_id)?;
+                                            Conflict::without_resolution(
+                                                ResolutionFailure::OursAddedTheirsAddedTypeMismatch {
+                                                    their_unique_location: renamed_location,
+                                                },
+                                                (ours, theirs, logical_side, outer_side),
+                                                [
+                                                    None,
+                                                    index_entry_at_path(&our_mode, &our_id, our_path_hint),
+                                                    index_entry_at_path(&their_mode, &their_id, their_path_hint),
+                                                ],
+                                            )
+                                        };
+                                        if should_fail_on_conflict(conflict) {
                                             break 'outer;
                                         }
                                     }
@@ -1250,11 +1307,7 @@ where
                                         editor.remove(toc(blocking_source))?;
                                         editor.remove(toc(blocking_location))?;
                                         our_tree.remove_existing_change(blocking_location.as_bstr());
-                                        editor.upsert(
-                                            toc(&renamed_location),
-                                            blocking_mode.kind(),
-                                            *blocking_id,
-                                        )?;
+                                        editor.upsert(toc(&renamed_location), blocking_mode.kind(), *blocking_id)?;
                                         apply_change(&mut editor, theirs, None)?;
                                         ours_disposition = ChangeDisposition::Applied;
                                         theirs_disposition = ChangeDisposition::Applied;
@@ -1293,7 +1346,10 @@ where
                                     ..
                                 },
                                 // NOTE: renames are only tracked among these kinds of types anyway, but we make sure.
-                            ) if our_mode.is_blob_or_symlink() && their_mode.is_blob_or_symlink() => {
+                            ) if our_mode.is_blob_or_symlink()
+                                && their_mode.is_blob_or_symlink()
+                                && merge_modes(*our_mode, *their_mode).is_some() =>
+                            {
                                 let (merged_blob_id, mut resolution) = if our_id == their_id {
                                     (*our_id, None)
                                 } else {
