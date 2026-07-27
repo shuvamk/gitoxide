@@ -604,15 +604,26 @@ impl App {
             return;
         };
         let mut pending = HashSet::from([anchor]);
+        let mut excluded: HashSet<_> = self
+            .rows
+            .iter()
+            .find(|row| row.id == anchor && row.parent_ids.len() > 1)
+            .and_then(|row| row.parent_ids.iter().next().copied())
+            .into_iter()
+            .collect();
         self.reachable_rows = Some(
             self.rows
                 .iter()
                 .map(|row| {
-                    if !pending.remove(&row.id) {
-                        return false;
+                    let reachable = pending.remove(&row.id);
+                    if reachable {
+                        pending.extend(row.parent_ids.iter().copied());
                     }
-                    pending.extend(row.parent_ids.iter().copied());
-                    true
+                    let first_parent_reachable = excluded.remove(&row.id);
+                    if first_parent_reachable {
+                        excluded.extend(row.parent_ids.iter().copied());
+                    }
+                    reachable && !first_parent_reachable
                 })
                 .collect(),
         );
@@ -1418,6 +1429,35 @@ mod tests {
             app.rows.len(),
             1,
             "completion racing cancellation keeps already displayed commits"
+        );
+    }
+
+    #[test]
+    fn shift_excludes_a_merges_first_parent_history() {
+        let mut app = App::new(7);
+        app.extend_commits(vec![
+            row_with_parents(6, &[5, 4]),
+            row_with_parents(5, &[3]),
+            row_with_parents(4, &[2]),
+            row_with_parents(3, &[1]),
+            row_with_parents(2, &[1]),
+            row(1),
+        ]);
+        complete(&mut app);
+        app.selected = app.rows.iter().position(|row| row.id == id(6));
+
+        app.update(Action::PreviewAuthorCopy(true));
+        let reachable: Vec<_> = app
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| app.is_row_reachable(*index))
+            .map(|(_, row)| row.id)
+            .collect();
+        assert_eq!(
+            reachable,
+            [id(6), id(4), id(2)],
+            "the merge side excludes first-parent history and shared ancestors"
         );
     }
 
