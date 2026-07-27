@@ -1547,6 +1547,52 @@ EOF
   git commit -m "add nested gitlink below d"
 )
 
+git init gitlink-vs-renamed-symlink-directory-with-siblings
+(cd gitlink-vs-renamed-symlink-directory-with-siblings
+  git commit --allow-empty -m "gitlink target"
+  root="$(git rev-parse HEAD)"
+  mkdir -p a/a
+  ln -s target a/a/a
+  git add a/a/a
+  git update-index --add --cacheinfo 160000,$root,h
+  git commit -m "symlink and gitlink base"
+
+  git branch A
+  git branch B
+
+  # A replaces the symlink-containing directory with a regular child and keeps
+  # the gitlink at `h`. B instead removes that gitlink, moves the symlink below
+  # a new `h` directory, and adds a sibling below it. Resolving the resulting
+  # type mismatch may consume the sibling's structural path before cleanup.
+  git checkout A
+  git rm a/a/a
+  mkdir a
+  write_lines changed >a/b
+  git add a/b
+  git commit -m "replace the symlink directory"
+
+  git checkout B
+  git mv a/a/a moved-link
+  git update-index --force-remove h
+  mkdir -p h/b
+  git mv moved-link h/a
+  write_lines sibling >h/b/a
+  git add .
+  git commit -m "replace the gitlink with a renamed symlink and sibling"
+
+  # gix follows the detected `a` -> `h` directory rename and relocates A's
+  # added `a/b` to `h/b~A`. Git leaves the addition at `a/b`; this fixture
+  # records the existing semantic difference while guarding the path cleanup.
+  git checkout -b expected B
+  git update-index --add --cacheinfo "100644,$(git rev-parse A:a/b),h/b~A"
+  git commit -m "expected gix merge"
+
+  # When B is ours, gix also preserves A's blocking gitlink at its unique path.
+  git checkout -b expected-reversed
+  git update-index --add --cacheinfo "160000,$root,h~B"
+  git commit -m "expected reversed gix merge"
+)
+
 git init modified-file-vs-gitlink-directory
 (cd modified-file-vs-gitlink-directory
   ln -s target a
@@ -1853,6 +1899,7 @@ baseline symlink-modification A-B A B
 baseline symlink-addition A-B A B
 baseline added-file-vs-added-directory A-B A B
 baseline added-symlink-blocks-gitlink-directory A-B A B
+baseline gitlink-vs-renamed-symlink-directory-with-siblings A-B A B "gix relocates A's addition through the detected directory rename, while Git keeps it at its original path"
 baseline modified-file-vs-gitlink-directory A-B A B
 baseline relocated-addition-blocked-by-rename A-B A B
 baseline directory-rename-vs-directory-to-file A-B A B
@@ -2084,6 +2131,49 @@ EOF
   make_resolve_tree ours A B
 
   # Choosing B rejects A's rename and keeps B's replacement directory.
+  git read-tree B
+  make_resolve_tree ours B A
+)
+
+(cd gitlink-vs-renamed-symlink-directory-with-siblings
+  # Git retains the renamed symlink's base stage and leaves `a/b` unconflicted.
+  # gix instead records only the surviving rename side and the relocated
+  # addition as the two sides of its file/directory conflict.
+  rm .git/index
+  git update-index --index-info <<EOF
+120000 blob $(git rev-parse B:h/a) 3	h/a
+100644 blob $(git rev-parse B:h/b/a)	h/b/a
+100644 blob $(git rev-parse A:a/b) 2	h/b~A
+EOF
+  make_conflict_index gitlink-vs-renamed-symlink-directory-with-siblings-A-B
+
+  rm .git/index
+  git update-index --index-info <<EOF
+120000 blob $(git rev-parse B:h/a) 2	h/a
+100644 blob $(git rev-parse B:h/b/a)	h/b/a
+100644 blob $(git rev-parse A:a/b) 3	h/b~A
+160000 commit $(git rev-parse main:h) 2	h~B
+EOF
+  make_conflict_index gitlink-vs-renamed-symlink-directory-with-siblings-A-B-reversed
+
+  # Ancestor keeps the renamed symlink at its base path, while the independent
+  # sibling below B's replacement directory remains applicable.
+  git read-tree main
+  git update-index --force-remove h
+  git update-index --add --cacheinfo "100644,$(git rev-parse B:h/b/a),h/b/a"
+  make_resolve_tree ancestor A B
+  git read-tree main
+  git update-index --force-remove h
+  git update-index --add --cacheinfo "100644,$(git rev-parse B:h/b/a),h/b/a"
+  make_resolve_tree ancestor B A
+
+  # With A as ours, its addition follows the detected directory rename while
+  # the conflicting gitlink and B's sibling are rejected.
+  git read-tree --empty
+  git update-index --add --cacheinfo "100644,$(git rev-parse A:a/b),h/b"
+  make_resolve_tree ours A B
+
+  # With B as ours, retain B's replacement directory.
   git read-tree B
   make_resolve_tree ours B A
 )

@@ -773,7 +773,7 @@ where
                                                 relation: None,
                                             };
                                             editor.upsert(toc(location), our_mode.kind(), our_id)?;
-                                            tree_with_rename.remove_existing_change(location.as_bstr());
+                                            tree_with_rename.remove_change(location.as_bstr());
                                             push_deferred(
                                                 (new_change, None),
                                                 pick_mut(logical_side, their_changes, our_changes),
