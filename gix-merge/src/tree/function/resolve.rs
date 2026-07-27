@@ -1562,8 +1562,7 @@ where
                                 match tree_conflicts {
                                     None | Some(ResolveWith::Ours) => {
                                         editor.remove(toc(source_location))?;
-                                        pick_mut(side, our_tree, their_tree)
-                                            .remove_existing_change(source_location.as_bstr());
+                                        pick_mut(side, our_tree, their_tree).remove_change(source_location.as_bstr());
                                         match side {
                                             Original => ours_disposition = ChangeDisposition::Applied,
                                             Swapped => theirs_disposition = ChangeDisposition::Applied,
