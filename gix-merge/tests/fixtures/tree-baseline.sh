@@ -184,6 +184,29 @@ git init deleted-file-added-dir
   git add to-be-deleted/a && git commit -m "replace file with directory"
 )
 
+git init deleted-file-added-gitlink-directory
+(cd deleted-file-added-gitlink-directory
+  write_lines original >a
+  git add a
+  git commit -m "file base"
+  base=$(git rev-parse HEAD)
+
+  git branch A
+  git branch B
+
+  # Both sides delete `a`; B additionally replaces it with a directory containing
+  # a gitlink. The shared deletion and descendant addition are compatible even
+  # though the gitlink takes a different structural merge path than a blob.
+  git checkout A
+  git rm a
+  git commit -m "delete a"
+
+  git checkout B
+  git rm a
+  git update-index --add --cacheinfo 160000,$base,a/a
+  git commit -m "replace a with a gitlink directory"
+)
+
 git init tree-to-non-tree
 (cd tree-to-non-tree
   mkdir -p a/sub
@@ -1603,6 +1626,7 @@ git init type-change-to-symlink
 
 baseline non-tree-to-tree A-B A B
 baseline deleted-file-added-dir A-B A B
+baseline deleted-file-added-gitlink-directory A-B A B
 baseline tree-to-non-tree A-B A B
 baseline tree-to-non-tree-with-rename A-B A B
 baseline non-tree-to-tree-with-rename A-B A B
@@ -1694,6 +1718,16 @@ baseline type-change-to-symlink A-B A B
   git read-tree A
   make_resolve_tree ours A B
   git read-tree B
+  make_resolve_tree ours B A
+)
+
+(cd deleted-file-added-gitlink-directory
+  # Both operations are compatible, so forced conflict resolution changes nothing:
+  # the shared deletion applies and B's directory remains in both directions.
+  git read-tree B
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+  make_resolve_tree ours A B
   make_resolve_tree ours B A
 )
 

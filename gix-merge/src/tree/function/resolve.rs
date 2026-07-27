@@ -518,6 +518,16 @@ where
                                 }
                             }
                             (
+                                Change::Deletion { .. },
+                                Change::Addition { .. },
+                            ) if matches!(match_kind, Some(MatchKind::EraseLeaf))
+                                && !our_changes[ours_idx].was_processed_without_application() =>
+                            {
+                                // Let the shared parent deletion pair with the other side's deletion first.
+                                // Applying it after this descendant would remove the newly created directory.
+                                push_deferred((theirs.clone(), Some(ours_idx)), their_changes);
+                            }
+                            (
                                 Change::Rewrite { .. },
                                 Change::Addition { .. },
                             ) if matches!(match_kind, Some(MatchKind::EraseLeaf))
