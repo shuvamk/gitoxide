@@ -541,6 +541,28 @@ git init renames-to-same-destination
   git commit -m "rename two to target"
 )
 
+git init identical-renames-to-same-destination
+(cd identical-renames-to-same-destination
+  write_lines same >one
+  cp one two
+  git add .
+  git commit -m "two identical files"
+
+  git branch A
+  git branch B
+
+  # Both sides rename a different source to `target`, but the entries have the
+  # same mode and object ID. There is nothing to content-merge and the two
+  # operations collapse cleanly to the shared destination in either direction.
+  git checkout A
+  git mv one target
+  git commit -m "rename one to target"
+
+  git checkout B
+  git mv two target
+  git commit -m "rename two to target"
+)
+
 git init deleted-file-added-dir-with-rename
 (cd deleted-file-added-dir-with-rename
   # Regression for a deletion that is processed but not applied:
@@ -1784,6 +1806,7 @@ baseline rename-change-matrix A-B A B
 baseline same-rename-with-content A-B A B
 baseline same-rename-and-file-to-directory A-B A B
 baseline renames-to-same-destination A-B A B
+baseline identical-renames-to-same-destination A-B A B
 baseline deleted-file-added-dir-with-rename A-B A B
 baseline rename-add A-B A B
 baseline rename-add A-B-diff3 A B
@@ -2306,6 +2329,17 @@ EOF
 100644 blob $(git rev-parse main:one)	one
 100644 blob $(git rev-parse B:target)	target
 EOF
+  make_resolve_tree ours B A
+)
+
+(cd identical-renames-to-same-destination
+  # Identical entries make the two renames compatible rather than a tree
+  # conflict, so conflict-resolution policy must not alter the clean result.
+  IFS= read -r -d '' merged_tree_id <A-B.merge-info
+  git read-tree "$merged_tree_id"
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+  make_resolve_tree ours A B
   make_resolve_tree ours B A
 )
 

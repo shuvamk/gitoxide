@@ -1094,6 +1094,34 @@ where
                                 },
                             ) if our_source_location != their_source_location
                                 && location == their_location
+                                && our_mode == their_mode
+                                && our_id == their_id =>
+                            {
+                                editor.remove(toc(our_source_location))?;
+                                editor.remove(toc(their_source_location))?;
+                                our_tree.remove_change(our_source_location.as_bstr());
+                                their_tree.remove_change(their_source_location.as_bstr());
+                                editor.upsert(toc(location), our_mode.kind(), *our_id)?;
+                                ours_disposition = ChangeDisposition::Applied;
+                                theirs_disposition = ChangeDisposition::Applied;
+                            }
+                            (
+                                Change::Rewrite {
+                                    source_location: our_source_location,
+                                    entry_mode: our_mode,
+                                    id: our_id,
+                                    location,
+                                    ..
+                                },
+                                Change::Rewrite {
+                                    source_location: their_source_location,
+                                    entry_mode: their_mode,
+                                    id: their_id,
+                                    location: their_location,
+                                    ..
+                                },
+                            ) if our_source_location != their_source_location
+                                && location == their_location
                                 && !involves_submodule(our_mode, their_mode) =>
                             {
                                 match tree_conflicts {
