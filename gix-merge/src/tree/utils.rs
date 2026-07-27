@@ -80,7 +80,7 @@ pub fn unique_path_in_tree(
     // We could use a cursor here, but clashes are so unlikely that this wouldn't be meaningful for performance.
     let base_len = buf.len();
     let mut suffix = 0;
-    while editor.get(to_components_bstring_ref(&buf)).is_some() || tree.check_conflict(buf.as_bstr()).is_some() {
+    while editor.get(to_components_bstring_ref(&buf)).is_some() || tree.path_is_occupied(buf.as_bstr()) {
         buf.truncate(base_len);
         buf.push_str(format!("_{suffix}"));
         suffix += 1;
@@ -579,6 +579,11 @@ impl TreeNodes {
         .into()
     }
 
+    fn path_is_occupied(&self, location: &BStr) -> bool {
+        self.check_conflict(location)
+            .is_some_and(|conflict| !matches!(conflict, PossibleConflict::PassedRewrittenDirectory { .. }))
+    }
+
     pub fn remove_existing_change(&mut self, location: &BStr) {
         self.remove_change_inner(location, true);
     }
@@ -728,6 +733,48 @@ mod tree_nodes_tests {
                 Some(PossibleConflict::Match { change_idx: 42 })
             ),
             "a missing `a` prefix must stop removal before an unrelated root-level `b`"
+        );
+    }
+
+    #[test]
+    fn passing_a_rewritten_directory_does_not_occupy_every_path_below_it() {
+        let mut tree = TreeNodes::new();
+        tree.track_change(
+            &Change::Rewrite {
+                source_location: "old".into(),
+                source_entry_mode: EntryKind::Tree.into(),
+                source_relation: None,
+                source_id: gix_hash::Kind::Sha1.null(),
+                diff: None,
+                entry_mode: EntryKind::Tree.into(),
+                id: gix_hash::Kind::Sha1.null(),
+                location: "new".into(),
+                relation: None,
+                copy: false,
+            },
+            0,
+        );
+        tree.track_change(
+            &Change::Modification {
+                location: "old/existing".into(),
+                previous_entry_mode: EntryKind::Blob.into(),
+                previous_id: gix_hash::Kind::Sha1.null(),
+                entry_mode: EntryKind::Blob.into(),
+                id: gix_hash::Kind::Sha1.null(),
+            },
+            1,
+        );
+
+        assert!(
+            matches!(
+                tree.check_conflict("old/file~side".into()),
+                Some(PossibleConflict::PassedRewrittenDirectory { change_idx: 0 })
+            ),
+            "the path still has to follow the directory rename"
+        );
+        assert!(
+            !tree.path_is_occupied("old/file~side".into()),
+            "the directory rewrite is scheduling information, not a name collision"
         );
     }
 }
