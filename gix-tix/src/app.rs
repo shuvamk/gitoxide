@@ -599,6 +599,10 @@ impl App {
     }
 
     fn compute_reachable_rows(&mut self) {
+        if self.state != State::Complete {
+            self.reachable_rows = None;
+            return;
+        }
         let Some(anchor) = self.reachability_anchor else {
             self.reachable_rows = None;
             return;
@@ -1259,6 +1263,29 @@ mod tests {
         app.update(Action::PreviewAuthorCopy(false));
         app.update(Action::MoveUp);
         assert_eq!(app.rows[app.selected.expect("normal navigation is restored")].id, id(2));
+    }
+
+    #[test]
+    fn shift_defers_reachability_until_the_graph_is_complete() {
+        let mut app = App::new(4);
+        app.extend_commits(vec![row_with_parents(4, &[3]), row_with_parents(3, &[2])]);
+
+        app.update(Action::PreviewAuthorCopy(true));
+        assert!(
+            app.reachable_rows.is_none(),
+            "pressing Shift while traversing does not compute reachability"
+        );
+        app.extend_commits(vec![row_with_parents(2, &[1]), row(1)]);
+        assert!(
+            app.reachable_rows.is_none(),
+            "later traversal batches do not recompute reachability"
+        );
+
+        complete(&mut app);
+        assert!(
+            app.reachable_rows.is_some(),
+            "graph completion computes reachability once"
+        );
     }
 
     #[test]
