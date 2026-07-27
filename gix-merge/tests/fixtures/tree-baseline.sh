@@ -1431,6 +1431,57 @@ git init symlink-addition
   git commit -m "new link to point to 'b'"
 )
 
+git init added-symlink-blocks-gitlink-directory
+(cd added-symlink-blocks-gitlink-directory
+  git commit --allow-empty -m "empty base"
+  base="$(git rev-parse HEAD)"
+
+  git branch A
+  git branch B
+
+  # A adds a non-tree at `d`, while B adds a directory at the same path. The nested
+  # gitlink is deliberate: tree/non-tree handling must not accidentally route this
+  # structural conflict through the blob or submodule merge cases.
+  git checkout A
+  ln -s target d
+  git add d
+  git commit -m "add symlink d"
+
+  git checkout B
+  git update-index --index-info <<EOF
+160000 commit $base	d/a/d
+EOF
+  git commit -m "add nested gitlink below d"
+)
+
+git init modified-file-vs-gitlink-directory
+(cd modified-file-vs-gitlink-directory
+  ln -s target a
+  git add a
+  git commit -m "symlink base"
+  base="$(git rev-parse HEAD)"
+
+  git branch A
+  git branch B
+
+  # A replaces the symlink with an executable file while B replaces it with a
+  # directory. The nested gitlink makes its addition sort before the base-file
+  # deletion, exercising merge scheduling independently of diff order.
+  git checkout A
+  rm a
+  write_lines modified >a
+  chmod +x a
+  git add a
+  git commit -m "replace a with an executable"
+
+  git checkout B
+  git rm a
+  git update-index --index-info <<EOF
+160000 commit $base	a/h
+EOF
+  git commit -m "replace a with a gitlink directory"
+)
+
 git init type-change-to-symlink
 (cd type-change-to-symlink
   touch a b link
@@ -1522,6 +1573,8 @@ baseline multiple-merge-bases A-B-diff3 A B
 baseline rename-and-modification A-B A B
 baseline symlink-modification A-B A B
 baseline symlink-addition A-B A B
+baseline added-symlink-blocks-gitlink-directory A-B A B
+baseline modified-file-vs-gitlink-directory A-B A B
 baseline type-change-to-symlink A-B A B
 
 ##
@@ -1529,6 +1582,33 @@ baseline type-change-to-symlink A-B A B
 ## when making tree-conflict resolution expectations. It's important
 ## to get these right.
 ##
+(cd added-symlink-blocks-gitlink-directory
+  # The ancestor is empty, so choosing it keeps neither addition in either direction.
+  git read-tree main
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+
+  # Choosing ours keeps precisely the side named first: either A's symlink or B's
+  # directory containing the nested gitlink.
+  git read-tree A
+  make_resolve_tree ours A B
+  git read-tree B
+  make_resolve_tree ours B A
+)
+
+(cd modified-file-vs-gitlink-directory
+  # Ancestor resolution restores the original symlink in both directions.
+  git read-tree main
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+
+  # Choosing ours keeps precisely the selected replacement.
+  git read-tree A
+  make_resolve_tree ours A B
+  git read-tree B
+  make_resolve_tree ours B A
+)
+
 (cd simple
   rm .git/index
   # 'whatever' is tree-conflict, 'greeting' is content conflict with markers

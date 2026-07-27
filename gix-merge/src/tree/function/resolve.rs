@@ -20,7 +20,7 @@ use crate::tree::{
     },
 };
 
-use super::change::{collect as collect_changes, matching as matching_change, pair as pair_candidate};
+use super::change::{MatchKind, collect as collect_changes, matching as matching_change, pair as pair_candidate};
 
 /// Perform a merge between `our_tree` and `their_tree`, using `base_tree` as merge-base.
 /// Note that `base_tree` can be an empty tree to indicate 'no common ancestor between the two sides'.
@@ -513,6 +513,68 @@ where
                             }
                             (
                                 Change::Addition {
+                                    location: blocking_location,
+                                    entry_mode: blocking_mode,
+                                    id: blocking_id,
+                                    ..
+                                },
+                                Change::Addition { .. },
+                            ) if matches!(match_kind, Some(MatchKind::EraseLeaf)) => {
+                                // `ours` is the non-tree prefix of `theirs`, whose parent directories
+                                // are represented only by already-applied structural changes. Preserve
+                                // the directory at its intended path and move the blocking addition.
+                                let renamed_location = unique_path_in_tree(
+                                    blocking_location.as_bstr(),
+                                    &editor,
+                                    our_tree,
+                                    labels.current.unwrap_or_default(),
+                                )?;
+                                let conflict = Conflict::without_resolution(
+                                    ResolutionFailure::OursDirectoryTheirsNonDirectoryTheirsRenamed {
+                                        renamed_unique_path_of_theirs: renamed_location.clone(),
+                                    },
+                                    (ours, theirs, Swapped, outer_side),
+                                    [
+                                        None,
+                                        None,
+                                        index_entry_at_path(
+                                            blocking_mode,
+                                            blocking_id,
+                                            ConflictIndexEntryPathHint::RenamedOrTheirs,
+                                        ),
+                                    ],
+                                );
+
+                                match tree_conflicts {
+                                    None => {
+                                        editor.remove(toc(blocking_location))?;
+                                        our_tree.remove_existing_change(blocking_location.as_bstr());
+                                        editor.upsert(toc(&renamed_location), blocking_mode.kind(), *blocking_id)?;
+                                        apply_change(&mut editor, theirs, None)?;
+                                        ours_disposition = ChangeDisposition::Applied;
+                                        theirs_disposition = ChangeDisposition::Applied;
+                                    }
+                                    Some(ResolveWith::Ours) => match outer_side {
+                                        Original => {
+                                            apply_change(&mut editor, ours, None)?;
+                                            ours_disposition = ChangeDisposition::Applied;
+                                        }
+                                        Swapped => {
+                                            editor.remove(toc(blocking_location))?;
+                                            our_tree.remove_existing_change(blocking_location.as_bstr());
+                                            apply_change(&mut editor, theirs, None)?;
+                                            theirs_disposition = ChangeDisposition::Applied;
+                                        }
+                                    },
+                                    Some(ResolveWith::Ancestor) => {}
+                                }
+
+                                if should_fail_on_conflict(conflict) {
+                                    break 'outer;
+                                }
+                            }
+                            (
+                                Change::Addition {
                                     location,
                                     entry_mode: our_mode,
                                     id: our_id,
@@ -798,9 +860,11 @@ where
                             ) if ours.location() != theirs.location() => {
                                 match tree_conflicts {
                                     None => {
-                                        unreachable!(
-                                            "modification/deletion pair should prevent modification/addition from happening"
-                                        )
+                                        // A file-to-directory diff can yield the descendant addition
+                                        // before the deletion of the blocking base file. Defer it so
+                                        // the modification/deletion pair can relocate the modification
+                                        // and remove this structural match first.
+                                        push_deferred((theirs.clone(), Some(ours_idx)), their_changes);
                                     }
                                     Some(ResolveWith::Ancestor) => {}
                                     Some(ResolveWith::Ours) => {
