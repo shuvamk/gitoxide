@@ -1482,6 +1482,32 @@ EOF
   git commit -m "replace a with a gitlink directory"
 )
 
+git init relocated-addition-blocked-by-rename
+(cd relocated-addition-blocked-by-rename
+  mkdir -p c
+  write_lines base >c/c
+  git add .
+  git commit -m "file in c"
+
+  git branch A
+  git branch B
+
+  # A's exact file rename also implies the directory rename `c` -> `a`. B adds
+  # `c/a/c`, so directory-rename handling relocates it to `a/a/c`, where A's
+  # renamed file at `a/a` blocks the required directory.
+  git checkout A
+  mkdir -p a
+  git mv c/c a/a
+  rmdir c
+  git commit -m "rename c/c to a/a"
+
+  git checkout B
+  mkdir -p c/a
+  write_lines added >c/a/c
+  git add .
+  git commit -m "add below renamed directory"
+)
+
 git init type-change-to-symlink
 (cd type-change-to-symlink
   touch a b link
@@ -1575,6 +1601,7 @@ baseline symlink-modification A-B A B
 baseline symlink-addition A-B A B
 baseline added-symlink-blocks-gitlink-directory A-B A B
 baseline modified-file-vs-gitlink-directory A-B A B
+baseline relocated-addition-blocked-by-rename A-B A B
 baseline type-change-to-symlink A-B A B
 
 ##
@@ -1606,6 +1633,21 @@ baseline type-change-to-symlink A-B A B
   git read-tree A
   make_resolve_tree ours A B
   git read-tree B
+  make_resolve_tree ours B A
+)
+
+(cd relocated-addition-blocked-by-rename
+  # The explicit file rename prevents the inferred directory rename from relocating
+  # B's addition through a non-tree. The changes are therefore compatible, and forced
+  # conflict resolution has nothing to discard in either direction.
+  IFS= read -r -d '' merged_tree_id <A-B.merge-info
+  git read-tree "$merged_tree_id"
+  make_resolve_tree ancestor A B
+  make_resolve_tree ours A B
+
+  IFS= read -r -d '' merged_reversed_tree_id <A-B-reversed.merge-info
+  git read-tree "$merged_reversed_tree_id"
+  make_resolve_tree ancestor B A
   make_resolve_tree ours B A
 )
 

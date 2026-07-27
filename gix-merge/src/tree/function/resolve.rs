@@ -192,10 +192,6 @@ where
                     }
                     Some(candidate) => {
                         use crate::tree::utils::to_components_bstring_ref as toc;
-                        debug_assert!(
-                            rewritten_location.is_none(),
-                            "We should probably handle the case where a rewritten location is passed down here"
-                        );
 
                         if let PossibleConflict::PassedRewrittenDirectory { change_idx } = candidate {
                             let ours = &our_changes[change_idx];
@@ -510,6 +506,19 @@ where
                                 )) {
                                     break 'outer;
                                 }
+                            }
+                            (
+                                Change::Rewrite { .. },
+                                Change::Addition { .. },
+                            ) if matches!(match_kind, Some(MatchKind::EraseLeaf))
+                                && rewritten_location.is_some() =>
+                            {
+                                // An explicit file rename blocks the inferred directory-rename destination.
+                                // Keep the explicit rename and apply the addition at its original location.
+                                apply_change(&mut editor, ours, None)?;
+                                apply_change(&mut editor, theirs, None)?;
+                                ours_disposition = ChangeDisposition::Applied;
+                                theirs_disposition = ChangeDisposition::Applied;
                             }
                             (
                                 Change::Addition {
