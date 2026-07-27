@@ -58,18 +58,19 @@ pub fn rewrite_location_with_renamed_directory(their_location: &BStr, passed_cha
     }
 }
 
-/// Produce a unique path within the directory that contains the file at `file_path` like `a/b`, using `editor`
-/// and `tree` to assure unique names, to obtain the tree at `a/` and `side_name` to more clearly signal
-/// where the file is coming from.
+/// Produce a side-qualified path for `file_path` like `a/b`, using `editor` and `tree` to assure uniqueness.
+///
+/// This normally keeps the file in its directory, as in `a/b~side`. If a non-tree component blocks that directory,
+/// the blocker itself is qualified instead, as in `a~side/b`, because changing only the child name could never make
+/// the path available.
 pub fn unique_path_in_tree(
     file_path: &BStr,
     editor: &tree::Editor<'_>,
     tree: &TreeNodes,
     side_name: &BStr,
 ) -> Result<BString, Error> {
-    let mut buf = file_path.to_owned();
-    buf.push(b'~');
-    buf.extend(
+    let mut qualifier = BString::from("~");
+    qualifier.extend(
         side_name
             .as_bytes()
             .iter()
@@ -77,15 +78,35 @@ pub fn unique_path_in_tree(
             .map(|b| if b == b'/' { b'_' } else { b }),
     );
 
-    // We could use a cursor here, but clashes are so unlikely that this wouldn't be meaningful for performance.
-    let base_len = buf.len();
-    let mut suffix = 0;
-    while editor.get(to_components_bstring_ref(&buf)).is_some() || tree.path_is_occupied(buf.as_bstr()) {
-        buf.truncate(base_len);
-        buf.push_str(format!("_{suffix}"));
-        suffix += 1;
+    let mut component_end = file_path.len();
+    loop {
+        let at_root = !file_path[..component_end].contains(&b'/');
+        let mut suffix = None;
+        loop {
+            let mut buf = file_path[..component_end].to_owned();
+            buf.extend_from_slice(&qualifier);
+            if let Some(suffix) = suffix {
+                buf.push_str(format!("_{suffix}"));
+            }
+            buf.extend_from_slice(&file_path[component_end..]);
+
+            let conflict = tree.check_conflict(buf.as_bstr());
+            if !at_root && matches!(conflict, Some(PossibleConflict::NonTreeToTree { .. })) {
+                break;
+            }
+            if editor.get(to_components_bstring_ref(&buf)).is_none()
+                && conflict.is_none_or(|conflict| matches!(conflict, PossibleConflict::PassedRewrittenDirectory { .. }))
+            {
+                return Ok(buf);
+            }
+            suffix = Some(suffix.map_or(0, |suffix| suffix + 1));
+        }
+
+        component_end = file_path[..component_end]
+            .iter()
+            .rposition(|byte| *byte == b'/')
+            .expect("a non-root component always has a preceding slash");
     }
-    Ok(buf)
 }
 
 /// Perform a merge between two blobs and return the result of its object id.
@@ -541,7 +562,7 @@ impl TreeNodes {
             match cursor.children.get(component).copied() {
                 // *their* change is outside *our* tree
                 None => {
-                    let res = if cursor.is_leaf_node() {
+                    let res = if cursor.is_leaf_node() && !cursor.change_is_tree {
                         Some(PossibleConflict::NonTreeToTree {
                             change_idx: cursor.change_idx,
                         })
@@ -577,11 +598,6 @@ impl TreeNodes {
             }
         }
         .into()
-    }
-
-    fn path_is_occupied(&self, location: &BStr) -> bool {
-        self.check_conflict(location)
-            .is_some_and(|conflict| !matches!(conflict, PossibleConflict::PassedRewrittenDirectory { .. }))
     }
 
     pub fn remove_existing_change(&mut self, location: &BStr) {
@@ -798,9 +814,53 @@ mod tree_nodes_tests {
             ),
             "the path still has to follow the directory rename"
         );
-        assert!(
-            !tree.path_is_occupied("old/file~side".into()),
-            "the directory rewrite is scheduling information, not a name collision"
+    }
+
+    #[test]
+    fn a_tracked_tree_without_tracked_children_does_not_occupy_paths_below_it() {
+        let mut tree = TreeNodes::new();
+        tree.track_change(
+            &Change::Addition {
+                location: "dir".into(),
+                relation: None,
+                entry_mode: EntryKind::Tree.into(),
+                id: gix_hash::Kind::Sha1.null(),
+            },
+            0,
         );
+
+        assert!(
+            !matches!(
+                tree.check_conflict("dir/file~side".into()),
+                Some(PossibleConflict::NonTreeToTree { .. })
+            ),
+            "a tracked tree permits children even if no child change is currently tracked"
+        );
+    }
+
+    #[test]
+    fn unique_path_qualifies_a_non_tree_parent_instead_of_looping_over_child_names() -> Result<(), Error> {
+        let mut tree = TreeNodes::new();
+        tree.track_change(
+            &Change::Addition {
+                location: "dir".into(),
+                relation: None,
+                entry_mode: EntryKind::Blob.into(),
+                id: gix_hash::Kind::Sha1.null(),
+            },
+            0,
+        );
+        let editor = tree::Editor::new(
+            gix_object::Tree::default(),
+            &gix_object::find::Never,
+            gix_hash::Kind::Sha1,
+        );
+
+        assert_eq!(
+            unique_path_in_tree("dir/file".into(), &editor, &tree, "OURS".into())?,
+            "dir~OURS/file",
+            "the blocking path component itself must be moved aside"
+        );
+        Ok(())
     }
 }

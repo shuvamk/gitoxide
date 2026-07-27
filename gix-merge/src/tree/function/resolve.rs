@@ -517,34 +517,25 @@ where
                                     break 'outer;
                                 }
                             }
-                            (
-                                Change::Deletion { .. },
-                                Change::Addition { .. },
-                            ) if matches!(match_kind, Some(MatchKind::EraseLeaf))
-                                && !our_changes[ours_idx].was_processed_without_application() =>
+                            (Change::Deletion { .. }, Change::Addition { .. })
+                                if matches!(match_kind, Some(MatchKind::EraseLeaf))
+                                    && !our_changes[ours_idx].was_processed_without_application() =>
                             {
                                 // Let the shared parent deletion pair with the other side's deletion first.
                                 // Applying it after this descendant would remove the newly created directory.
                                 push_deferred((theirs.clone(), Some(ours_idx)), their_changes);
                             }
-                            (
-                                Change::Rewrite { .. },
-                                Change::Addition {
-                                    relation: Some(_), ..
-                                },
-                            ) if matches!(match_kind, Some(MatchKind::EraseLeaf))
-                                && needs_tree_insertion.is_none()
-                                && !matches!(tree_conflicts, Some(ResolveWith::Ancestor)) =>
+                            (Change::Rewrite { .. }, Change::Addition { relation: Some(_), .. })
+                                if matches!(match_kind, Some(MatchKind::EraseLeaf))
+                                    && needs_tree_insertion.is_none()
+                                    && !matches!(tree_conflicts, Some(ResolveWith::Ancestor)) =>
                             {
                                 // Let the replacement's parent deletion resolve the rename first.
                                 // The deferred child then ignores this already-handled rewrite.
                                 push_deferred((theirs.clone(), Some(ours_idx)), their_changes);
                             }
-                            (
-                                Change::Rewrite { .. },
-                                Change::Addition { .. },
-                            ) if matches!(match_kind, Some(MatchKind::EraseLeaf))
-                                && rewritten_location.is_some() =>
+                            (Change::Rewrite { .. }, Change::Addition { .. })
+                                if matches!(match_kind, Some(MatchKind::EraseLeaf)) && rewritten_location.is_some() =>
                             {
                                 // An explicit file rename blocks the inferred directory-rename destination.
                                 // Keep the explicit rename and apply the addition at its original location.
@@ -590,11 +581,7 @@ where
                                         editor.remove(toc(source_location))?;
                                         editor.remove(toc(blocking_location))?;
                                         our_tree.remove_change(blocking_location.as_bstr());
-                                        editor.upsert(
-                                            toc(&renamed_location),
-                                            blocking_mode.kind(),
-                                            *blocking_id,
-                                        )?;
+                                        editor.upsert(toc(&renamed_location), blocking_mode.kind(), *blocking_id)?;
                                         apply_change(&mut editor, theirs, None)?;
                                         ours_disposition = ChangeDisposition::Applied;
                                         theirs_disposition = ChangeDisposition::Applied;
@@ -654,11 +641,7 @@ where
                                     None => {
                                         editor.remove(toc(blocking_location))?;
                                         our_tree.remove_change(blocking_location.as_bstr());
-                                        editor.upsert(
-                                            toc(&renamed_location),
-                                            blocking_mode.kind(),
-                                            *blocking_id,
-                                        )?;
+                                        editor.upsert(toc(&renamed_location), blocking_mode.kind(), *blocking_id)?;
                                         apply_change(&mut editor, theirs, None)?;
                                         ours_disposition = ChangeDisposition::Applied;
                                         theirs_disposition = ChangeDisposition::Applied;
