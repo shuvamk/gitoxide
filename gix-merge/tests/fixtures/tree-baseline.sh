@@ -1457,6 +1457,28 @@ git init symlink-addition
   git commit -m "new link to point to 'b'"
 )
 
+git init added-file-vs-added-directory
+(cd added-file-vs-added-directory
+  git commit --allow-empty -m "empty base"
+
+  git branch A
+  git branch B
+
+  # A adds a file at `e`, while B adds a file below the directory `e`. Resolving
+  # this tree/non-tree pair removes B's `e/e` path-tree leaf; its now-empty `e`
+  # parent must not remain visible as a change during the inverse scheduling pass.
+  git checkout A
+  write_lines file >e
+  git add e
+  git commit -m "add file e"
+
+  git checkout B
+  mkdir e
+  write_lines nested >e/e
+  git add e/e
+  git commit -m "add directory e"
+)
+
 git init added-symlink-blocks-gitlink-directory
 (cd added-symlink-blocks-gitlink-directory
   git commit --allow-empty -m "empty base"
@@ -1650,6 +1672,7 @@ baseline multiple-merge-bases A-B-diff3 A B
 baseline rename-and-modification A-B A B
 baseline symlink-modification A-B A B
 baseline symlink-addition A-B A B
+baseline added-file-vs-added-directory A-B A B
 baseline added-symlink-blocks-gitlink-directory A-B A B
 baseline modified-file-vs-gitlink-directory A-B A B
 baseline relocated-addition-blocked-by-rename A-B A B
@@ -1661,6 +1684,19 @@ baseline type-change-to-symlink A-B A B
 ## when making tree-conflict resolution expectations. It's important
 ## to get these right.
 ##
+(cd added-file-vs-added-directory
+  # The ancestor is empty, so choosing it keeps neither addition.
+  git read-tree main
+  make_resolve_tree ancestor A B
+  make_resolve_tree ancestor B A
+
+  # Choosing ours keeps precisely the side selected by the merge direction.
+  git read-tree A
+  make_resolve_tree ours A B
+  git read-tree B
+  make_resolve_tree ours B A
+)
+
 (cd added-symlink-blocks-gitlink-directory
   # The ancestor is empty, so choosing it keeps neither addition in either direction.
   git read-tree main

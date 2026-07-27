@@ -527,7 +527,7 @@ impl TreeNodes {
     /// Search the tree with `our` changes for `theirs` by [`source_location()`](Change::source_location())).
     /// If there is an entry but both are the same, or if there is no entry, return `None`.
     pub fn check_conflict(&self, theirs_location: &BStr) -> Option<PossibleConflict> {
-        if self.0.len() == 1 {
+        if self.0[0].children.is_empty() {
             return None;
         }
         let components = to_components(theirs_location);
@@ -595,6 +595,7 @@ impl TreeNodes {
     fn remove_change_inner(&mut self, location: &BStr, must_exist: bool) {
         let mut components = to_components(location).peekable();
         let mut cursor_idx = 0;
+        let mut ancestry = Vec::new();
         while let Some(component) = components.next() {
             match self.0[cursor_idx].children.get(component).copied() {
                 None => {
@@ -603,11 +604,9 @@ impl TreeNodes {
                     return;
                 }
                 Some(existing_idx) => {
+                    ancestry.push((cursor_idx, component.to_owned(), existing_idx));
                     let is_last = components.peek().is_none();
                     if is_last {
-                        if self.0[existing_idx].is_leaf_node() {
-                            self.0[cursor_idx].children.remove(component);
-                        }
                         let node = &mut self.0[existing_idx];
                         debug_assert!(!must_exist || node.change_idx.is_some(), "no change at '{location}'");
                         node.change_idx = None;
@@ -617,6 +616,14 @@ impl TreeNodes {
                     }
                 }
             }
+        }
+
+        while let Some((parent_idx, component, child_idx)) = ancestry.pop() {
+            let child = &self.0[child_idx];
+            if child.change_idx.is_some() || !child.children.is_empty() {
+                break;
+            }
+            self.0[parent_idx].children.remove(component.as_bstr());
         }
     }
 
@@ -733,6 +740,26 @@ mod tree_nodes_tests {
                 Some(PossibleConflict::Match { change_idx: 42 })
             ),
             "a missing `a` prefix must stop removal before an unrelated root-level `b`"
+        );
+    }
+
+    #[test]
+    fn removing_a_change_prunes_empty_parent_nodes() {
+        let mut tree = TreeNodes::new();
+        tree.track_change(
+            &Change::Addition {
+                location: "e/e".into(),
+                relation: None,
+                entry_mode: EntryKind::Blob.into(),
+                id: gix_hash::Kind::Sha1.null(),
+            },
+            0,
+        );
+
+        tree.remove_existing_change("e/e".into());
+        assert!(
+            tree.check_conflict("e".into()).is_none(),
+            "an empty former parent isn't a leaf change or a path conflict"
         );
     }
 

@@ -202,7 +202,7 @@ fn run_baseline() -> crate::Result {
     }
 
     assert_eq!(
-        actual_cases, 139,
+        actual_cases, 141,
         "BUG: update this number, and don't forget to remove a filter in the end"
     );
     assert_eq!(
