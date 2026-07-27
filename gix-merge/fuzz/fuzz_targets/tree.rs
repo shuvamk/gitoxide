@@ -268,7 +268,7 @@ fn fuzz(data: &[u8]) {
     let mut blob_merge = new_blob_merge_platform();
 
     for (current, other) in [(ours, theirs), (theirs, ours)] {
-        let mut outcome = gix_merge::tree(
+        let outcome = gix_merge::tree(
             &base,
             &current,
             &other,
@@ -283,8 +283,14 @@ fn fuzz(data: &[u8]) {
             &mut diff_resource_cache,
             &mut blob_merge,
             options.clone(),
-        )
-        .expect("generated trees and objects are valid");
+        );
+        let mut outcome = match outcome {
+            Ok(outcome) => outcome,
+            // Resolving a binary add/add conflict with its absent ancestor cannot
+            // produce a resource. This is a valid configuration-dependent error.
+            Err(gix_merge::tree::Error::MergeResourceNotFound) => continue,
+            Err(err) => panic!("generated trees and objects are valid: {err:?}"),
+        };
         outcome
             .tree
             .write(|tree| objects.db.write(tree))
