@@ -54,6 +54,12 @@ mod _impl {
                 inner: Inner::ExnAsError(Exn::new(error).into()),
             }
         }
+
+        /// Create a new instance representing an already boxed `error`.
+        #[track_caller]
+        pub fn from_boxed(error: Box<dyn std::error::Error + Send + Sync + 'static>) -> Self {
+            Self::from_error(super::BoxedError(error))
+        }
     }
 
     impl std::fmt::Display for Error {
@@ -147,6 +153,12 @@ mod _impl {
                 inner: Exn::new(error).into_chain(),
             }
         }
+
+        /// Create a new instance representing an already boxed `error`.
+        #[track_caller]
+        pub fn from_boxed(error: Box<dyn std::error::Error + Send + Sync + 'static>) -> Self {
+            Self::from_error(super::BoxedError(error))
+        }
     }
 
     impl std::fmt::Display for Error {
@@ -180,12 +192,35 @@ mod _impl {
     }
 }
 
+struct BoxedError(Box<dyn std::error::Error + Send + Sync + 'static>);
+
+impl std::fmt::Display for BoxedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::fmt::Debug for BoxedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for BoxedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
 /// Return `true` if `err` or any error in its source chain indicates that retrying might succeed.
 pub fn can_retry(err: &(dyn std::error::Error + 'static)) -> bool {
     std::iter::successors(Some(err), |err| err.source()).any(is_retryable)
 }
 
 fn is_retryable(err: &(dyn std::error::Error + 'static)) -> bool {
+    if let Some(err) = err.downcast_ref::<BoxedError>() {
+        return can_retry(err.0.as_ref());
+    }
     if err.is::<crate::RetryableError>() {
         return true;
     }
@@ -208,10 +243,24 @@ fn is_retryable(err: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 fn is_corrupted(err: &(dyn std::error::Error + 'static)) -> bool {
+    if let Some(err) = err.downcast_ref::<BoxedError>() {
+        return std::iter::successors(
+            Some(err.0.as_ref() as &(dyn std::error::Error + 'static)),
+            |err| err.source(),
+        )
+        .any(is_corrupted);
+    }
     err.is::<crate::CorruptionError>()
 }
 
 fn is_not_found(err: &(dyn std::error::Error + 'static)) -> bool {
+    if let Some(err) = err.downcast_ref::<BoxedError>() {
+        return std::iter::successors(
+            Some(err.0.as_ref() as &(dyn std::error::Error + 'static)),
+            |err| err.source(),
+        )
+        .any(is_not_found);
+    }
     if err.is::<crate::NotFoundError>() {
         return true;
     }

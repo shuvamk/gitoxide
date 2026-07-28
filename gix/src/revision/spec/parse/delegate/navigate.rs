@@ -11,7 +11,6 @@ use crate::{
     Object,
     bstr::{BStr, ByteSlice},
     ext::ObjectIdExt,
-    object,
     revision::spec::parse::{Delegate, delegate::Replacements},
 };
 
@@ -33,16 +32,12 @@ impl delegate::Navigate for Delegate<'_> {
         for obj in objs.iter() {
             match kind {
                 Traversal::NthParent(num) => {
-                    match self.repo.find_object(*obj).or_erased().and_then(|obj| {
-                        obj.try_into_commit().map_err(|err| {
-                            let object::try_into::Error { actual, expected, id } = err;
-                            message!(
-                                "Object {oid} was a {actual}, but needed it to be a {expected}",
-                                oid = id.attach(repo).shorten_or_id(),
-                            )
-                            .raise_erased()
-                        })
-                    }) {
+                    match self
+                        .repo
+                        .find_object(*obj)
+                        .or_erased()
+                        .and_then(|obj| obj.try_into_commit().map_err(|err| err.raise_erased()))
+                    {
                         Ok(commit) => match commit.parent_ids().nth(num.saturating_sub(1)) {
                             Some(id) => replacements.push((commit.id, id.detach())),
                             None => errors.push((
