@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 use crate::{bstr::BString, remote};
+use gix_error::ErrorExt;
 
 #[cfg(feature = "async-network-client")]
 use gix_transport::client::async_io::Transport;
@@ -47,21 +48,7 @@ pub struct PrepareFetch {
 }
 
 /// The error returned by [`PrepareFetch::new()`].
-#[derive(Debug, thiserror::Error)]
-#[expect(missing_docs)]
-pub enum Error {
-    #[error(transparent)]
-    Init(#[from] crate::init::Error),
-    #[error(transparent)]
-    CommitterOrFallback(crate::config::commit_signature::Error),
-    #[error(transparent)]
-    UrlParse(#[from] gix_url::parse::Error),
-    #[error("Failed to turn a the relative file url \"{}\" into an absolute one", url.to_bstring())]
-    CanonicalizeUrl {
-        url: gix_url::Url,
-        source: gix_path::realpath::Error,
-    },
-}
+pub type Error = gix_error::Error;
 
 /// Instantiation
 impl PrepareFetch {
@@ -91,7 +78,9 @@ impl PrepareFetch {
         gix_url::parse::Error: From<E>,
     {
         Self::new_inner(
-            url.try_into().map_err(gix_url::parse::Error::from)?,
+            url.try_into()
+                .map_err(gix_url::parse::Error::from)
+                .map_err(gix_error::Error::from_error)?,
             path.as_ref(),
             kind,
             create_opts,
@@ -124,13 +113,14 @@ impl PrepareFetch {
         };
 
         let mut repo = crate::ThreadSafeRepository::init_opts(path, kind, create_opts, open_opts)?.to_thread_local();
-        url.canonicalize(repo.options.current_dir_or_empty())
-            .map_err(|err| Error::CanonicalizeUrl {
-                url: url.clone(),
-                source: err,
-            })?;
+        url.canonicalize(repo.options.current_dir_or_empty()).map_err(|err| {
+            gix_error::Error::from(err.and_raise(gix_error::message!(
+                "Failed to turn the relative file url {:?} into an absolute one",
+                url.to_bstring()
+            )))
+        })?;
         repo.committer_or_set_generic_fallback()
-            .map_err(Error::CommitterOrFallback)?;
+            .map_err(gix_error::Error::from_error)?;
         Ok(PrepareFetch {
             url,
             #[cfg(any(feature = "async-network-client", feature = "blocking-network-client"))]
