@@ -41,6 +41,51 @@ pub(crate) enum SignatureState {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+}
+
+impl ChangeKind {
+    pub(crate) fn letter(self) -> char {
+        match self {
+            ChangeKind::Added => 'A',
+            ChangeKind::Modified => 'M',
+            ChangeKind::Deleted => 'D',
+            ChangeKind::Renamed => 'R',
+            ChangeKind::Copied => 'C',
+            ChangeKind::TypeChanged => 'T',
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PathChange {
+    pub kind: ChangeKind,
+    pub source: Option<BString>,
+    pub path: BString,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Changes {
+    pub parent: Option<ComparedParent>,
+    pub paths: Vec<PathChange>,
+    pub lines_added: u64,
+    pub lines_removed: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ComparedParent {
+    pub index: usize,
+    pub total: usize,
+    pub id: ObjectId,
+}
+
 #[derive(Debug, Eq, Hash, PartialEq)]
 pub(crate) struct Author {
     pub name: &'static BStr,
@@ -153,6 +198,8 @@ pub(crate) enum Action {
     ToggleHidden,
     ToggleAlign,
     ToggleCommit,
+    ToggleChanges,
+    CycleChangesParent,
     VerifySignatures,
     Cancel,
     Copy,
@@ -194,6 +241,8 @@ pub(crate) struct App {
     pub show_hidden: bool,
     pub align_metadata: bool,
     pub show_commit: bool,
+    pub show_changes: bool,
+    pub(crate) changes_parent: usize,
     pub(crate) show_selection_tail: bool,
     pub inline: bool,
     pub preview_author_copy: bool,
@@ -235,6 +284,8 @@ impl App {
             show_hidden: false,
             align_metadata: true,
             show_commit: false,
+            show_changes: false,
+            changes_parent: 0,
             show_selection_tail: true,
             inline: false,
             preview_author_copy: false,
@@ -413,6 +464,12 @@ impl App {
             }
             Action::ToggleAlign => self.align_metadata = !self.align_metadata,
             Action::ToggleCommit => self.show_commit = !self.show_commit,
+            Action::ToggleChanges => self.show_changes = !self.show_changes,
+            Action::CycleChangesParent => {
+                if self.show_changes {
+                    self.changes_parent = self.changes_parent.saturating_add(1);
+                }
+            }
             Action::VerifySignatures if !self.signature_verification_running => {
                 let start = self.offset.min(self.rows.len());
                 let end = start.saturating_add(self.viewport_rows).min(self.rows.len());
@@ -1392,6 +1449,8 @@ mod tests {
         app.update(Action::ToggleRefs);
         app.update(Action::ToggleAlign);
         app.update(Action::ToggleCommit);
+        app.update(Action::ToggleChanges);
+        app.update(Action::CycleChangesParent);
 
         assert!(!app.show_committer_date);
         assert!(app.show_emails);
@@ -1405,6 +1464,8 @@ mod tests {
         assert_eq!(app.ref_mode, RefMode::Default);
         assert!(!app.align_metadata);
         assert!(app.show_commit);
+        assert!(app.show_changes);
+        assert_eq!(app.changes_parent, 1);
         app.update(Action::ToggleAlign);
         assert!(app.align_metadata);
     }

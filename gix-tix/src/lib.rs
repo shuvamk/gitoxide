@@ -18,7 +18,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use app::{Action, App, CommitRow, Effect, State};
+use app::{Action, App, ChangeKind, Changes, CommitRow, ComparedParent, Effect, PathChange, State};
 use crossterm::{
     clipboard::CopyToClipboard,
     cursor,
@@ -31,7 +31,10 @@ use crossterm::{
     style::Print,
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use gix::bstr::{BString, ByteSlice};
+use gix::{
+    bstr::{BString, ByteSlice},
+    prelude::TreeDiffChangeExt,
+};
 use history::{Authors, Decorations, Event, SharedAuthors};
 use ratatui::{TerminalOptions, Viewport, backend::CrosstermBackend};
 
@@ -252,8 +255,11 @@ fn sync_screen(
     enhanced_keyboard: bool,
 ) -> Result<()> {
     let inline_height = inline_height(screen, terminal::size()?.1, app.rows.len());
-    let needs_alternate_screen =
-        needs_alternate_screen(app.show_commit, history_requires_alternate_screen, inline_height);
+    let needs_alternate_screen = needs_alternate_screen(
+        app.show_commit || app.show_changes,
+        history_requires_alternate_screen,
+        inline_height,
+    );
     if !should_switch_screen(started_inline, needs_alternate_screen, inline_terminal.is_some()) {
         if let (true, Some(height)) = (started_inline && app.inline && resize_inline, inline_height) {
             resize_inline_screen(terminal, height).context("could not resize the inline history")?;
@@ -303,6 +309,7 @@ fn event_loop(
     let mut lane_receiver = None;
     let mut verification_receiver = None;
     let mut commit_message = None;
+    let mut changes = None;
     let mut fill_repository = FillRepository {
         path: &repository_path,
         retained: None,
@@ -319,6 +326,7 @@ fn event_loop(
         &authors,
         &mut fill_repository,
         &mut commit_message,
+        &mut changes,
     )?;
     let mut last_draw = Instant::now();
     let mut dirty = false;
@@ -365,6 +373,7 @@ fn event_loop(
                 &authors,
                 &mut fill_repository,
                 &mut commit_message,
+                &mut changes,
             )?;
             last_draw = Instant::now();
             dirty = false;
@@ -428,6 +437,7 @@ fn event_loop(
                 &authors,
                 &mut fill_repository,
                 &mut commit_message,
+                &mut changes,
             )?;
             last_draw = Instant::now();
             dirty = false;
@@ -530,6 +540,7 @@ fn event_loop(
             &authors,
             &mut fill_repository,
             &mut commit_message,
+            &mut changes,
         )?;
     }
     Ok(outcome)
@@ -538,6 +549,7 @@ fn event_loop(
 fn prepare_inline_exit(app: &mut App) {
     app.inline = true;
     app.show_commit = false;
+    app.show_changes = false;
     app.show_selection_tail = false;
 }
 
@@ -614,6 +626,7 @@ fn start_history(
     (cancelled, receiver)
 }
 
+#[expect(clippy::too_many_arguments, reason = "drawing needs the complete view state")]
 fn draw(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
@@ -622,6 +635,7 @@ fn draw(
     authors: &SharedAuthors,
     fill_repository: &mut FillRepository<'_>,
     commit_message: &mut Option<(gix::ObjectId, BString)>,
+    changes: &mut Option<(gix::ObjectId, usize, Changes)>,
 ) -> Result<()> {
     app.viewport_rows = terminal
         .get_frame()
@@ -631,15 +645,32 @@ fn draw(
     app.ensure_visible();
     let start = app.offset.min(app.rows.len());
     let end = start.saturating_add(app.viewport_rows).min(app.rows.len());
-    let selected = app
-        .show_commit
+    let selected = (app.show_commit || app.show_changes)
         .then(|| app.selected.and_then(|index| app.rows.get(index)).map(|row| row.id))
         .flatten();
-    let message_to_load = selected.filter(|id| commit_message.as_ref().map(|(cached, _)| cached) != Some(id));
-    if selected.is_none() {
+    let message_to_load = app
+        .show_commit
+        .then_some(selected)
+        .flatten()
+        .filter(|id| commit_message.as_ref().map(|(cached, _)| cached) != Some(id));
+    if app.show_changes && selected.is_some() && changes.as_ref().map(|(cached, _, _)| *cached) != selected {
+        app.changes_parent = 0;
+    }
+    let changes_to_load = app.show_changes.then_some(selected).flatten().filter(|id| {
+        changes
+            .as_ref()
+            .is_none_or(|(cached, parent, _)| cached != id || *parent != app.changes_parent)
+    });
+    if !app.show_commit || selected.is_none() {
         *commit_message = None;
     }
-    if app.rows[start..end].iter().any(|row| !row.metadata_loaded) || message_to_load.is_some() {
+    if !app.show_changes || selected.is_none() {
+        *changes = None;
+    }
+    if app.rows[start..end].iter().any(|row| !row.metadata_loaded)
+        || message_to_load.is_some()
+        || changes_to_load.is_some()
+    {
         let mut one_shot_repository = None;
         let repository = if fill_repository.retain {
             match &mut fill_repository.retained {
@@ -660,9 +691,15 @@ fn draw(
         if let Some(id) = message_to_load {
             *commit_message = Some((id, load_commit_message(repository, id)?));
         }
+        if let Some(id) = changes_to_load {
+            let loaded = load_changes(repository, id, app.changes_parent)?;
+            app.changes_parent = loaded.parent.map_or(0, |parent| parent.index);
+            *changes = Some((id, app.changes_parent, loaded));
+        }
     }
     let message = commit_message.as_ref().map(|(_, message)| message.as_bstr());
-    terminal.draw(|frame| ui::draw(frame, app, decorations, mailmap, message))?;
+    let changes = changes.as_ref().map(|(_, _, changes)| changes);
+    terminal.draw(|frame| ui::draw(frame, app, decorations, mailmap, message, changes))?;
     Ok(())
 }
 
@@ -675,6 +712,95 @@ fn open_fill_repository(repository_path: &Path) -> Result<gix::Repository> {
 fn load_commit_message(repository: &gix::Repository, id: gix::ObjectId) -> Result<BString> {
     let commit = repository.find_commit(id).context("could not load commit message")?;
     Ok(commit.message_raw_sloppy().to_owned())
+}
+
+fn load_changes(repository: &gix::Repository, id: gix::ObjectId, requested_parent: usize) -> Result<Changes> {
+    let commit = repository.find_commit(id).context("could not load changed paths")?;
+    let parents: Vec<_> = commit.parent_ids().collect();
+    let parent_index = requested_parent.checked_rem(parents.len()).unwrap_or_default();
+    let parent = parents.get(parent_index).copied();
+    let new_tree = commit.tree().context("could not load changed commit tree")?;
+    let old_tree = match parent {
+        Some(parent) => Some(
+            parent
+                .object()
+                .context("could not load parent commit")?
+                .try_into_commit()
+                .context("parent is not a commit")?
+                .tree()
+                .context("could not load parent commit tree")?,
+        ),
+        None => None,
+    };
+    let changes = repository
+        .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)
+        .context("could not diff commit trees")?;
+    let mut resource_cache = repository
+        .diff_resource_cache_for_tree_diff()
+        .context("could not initialize line diffs")?;
+    let mut out = Changes {
+        parent: (parents.len() > 1).then(|| ComparedParent {
+            index: parent_index,
+            total: parents.len(),
+            id: parent.expect("a merge has parents").detach(),
+        }),
+        ..Changes::default()
+    };
+    for change in changes {
+        use gix::object::tree::diff::ChangeDetached;
+        let (kind, source, path, is_tree) = match &change {
+            ChangeDetached::Addition {
+                entry_mode, location, ..
+            } => (ChangeKind::Added, None, location.clone(), entry_mode.is_tree()),
+            ChangeDetached::Deletion {
+                entry_mode, location, ..
+            } => (ChangeKind::Deleted, None, location.clone(), entry_mode.is_tree()),
+            ChangeDetached::Modification {
+                previous_entry_mode,
+                entry_mode,
+                location,
+                ..
+            } => (
+                if previous_entry_mode.kind() == entry_mode.kind() {
+                    ChangeKind::Modified
+                } else {
+                    ChangeKind::TypeChanged
+                },
+                None,
+                location.clone(),
+                previous_entry_mode.is_tree() && entry_mode.is_tree(),
+            ),
+            ChangeDetached::Rewrite {
+                source_location,
+                source_entry_mode,
+                entry_mode,
+                location,
+                copy,
+                ..
+            } => (
+                if *copy { ChangeKind::Copied } else { ChangeKind::Renamed },
+                Some(source_location.clone()),
+                location.clone(),
+                source_entry_mode.is_tree() || entry_mode.is_tree(),
+            ),
+        };
+        if is_tree {
+            continue;
+        }
+        if let Some(counts) = change
+            .attach(repository, repository)
+            .diff(&mut resource_cache)
+            .context("could not prepare line diff")?
+            .line_counts()
+            .context("could not count changed lines")?
+        {
+            out.lines_added += u64::from(counts.insertions);
+            out.lines_removed += u64::from(counts.removals);
+        }
+        resource_cache.clear_resource_cache_keep_allocation();
+        out.paths.push(PathChange { kind, source, path });
+    }
+    Ok(out)
 }
 
 fn actor_bytes(author: &app::Author) -> Vec<u8> {
@@ -716,6 +842,8 @@ fn action(key: KeyEvent) -> Option<Action> {
             Some(Action::PreviewAuthorCopy(key.kind != KeyEventKind::Release))
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
+        KeyCode::Char('c') => Some(Action::ToggleChanges),
+        KeyCode::Char('p') => Some(Action::CycleChangesParent),
         KeyCode::Char('q') => Some(Action::Quit),
         KeyCode::Esc => Some(Action::Cancel),
         KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
@@ -779,6 +907,85 @@ mod tests {
         assert!(
             load_commit_message(&repository, id)?.starts_with(b"topic\n\nCo-authored-by:"),
             "on-demand loading retains the full commit message"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn loads_changes_against_each_merge_parent() -> gix_testtools::Result {
+        let fixture = gix_testtools::scripted_fixture_read_only("history.sh")?;
+        let repository = gix::open(&fixture)?;
+
+        let root = load_changes(&repository, repository.rev_parse_single("v1^{}")?.detach(), 0)?;
+        assert_eq!(
+            root,
+            Changes {
+                parent: None,
+                paths: vec![PathChange {
+                    kind: ChangeKind::Added,
+                    source: None,
+                    path: "root".into(),
+                }],
+                lines_added: 1,
+                lines_removed: 0,
+            },
+            "root commits are compared to the empty tree"
+        );
+
+        let topic = load_changes(&repository, repository.rev_parse_single("topic")?.detach(), 0)?;
+        assert_eq!(
+            topic.paths,
+            [PathChange {
+                kind: ChangeKind::Added,
+                source: None,
+                path: "topic".into(),
+            }],
+            "single-parent changes retain diff order and status"
+        );
+        assert_eq!((topic.lines_added, topic.lines_removed), (1, 0));
+
+        let merge = repository.rev_parse_single("main")?.detach();
+        let first_parent = load_changes(&repository, merge, 0)?;
+        assert_eq!(
+            first_parent.parent,
+            Some(ComparedParent {
+                index: 0,
+                total: 2,
+                id: repository.rev_parse_single("main^1")?.detach(),
+            })
+        );
+        assert_eq!(
+            first_parent.paths,
+            [PathChange {
+                kind: ChangeKind::Added,
+                source: None,
+                path: "merged".into(),
+            }],
+            "the default merge diff compares the result to its first parent"
+        );
+
+        let second_parent = load_changes(&repository, merge, 1)?;
+        assert_eq!(
+            second_parent.parent,
+            Some(ComparedParent {
+                index: 1,
+                total: 2,
+                id: repository.rev_parse_single("main^2")?.detach(),
+            })
+        );
+        assert_eq!(
+            second_parent.paths,
+            [PathChange {
+                kind: ChangeKind::Added,
+                source: None,
+                path: "main".into(),
+            }],
+            "later parents can be selected independently"
+        );
+        assert_eq!(
+            load_changes(&repository, merge, 2)?.parent,
+            first_parent.parent,
+            "parent selection wraps around"
         );
         Ok(())
     }
@@ -937,6 +1144,14 @@ mod tests {
             Some(Action::ToggleCommit)
         );
         assert_eq!(
+            action(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
+            Some(Action::CycleChangesParent)
+        );
+        assert_eq!(
+            action(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Some(Action::ToggleChanges)
+        );
+        assert_eq!(
             action(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT)),
             Some(Action::CopyAuthor)
         );
@@ -982,12 +1197,13 @@ mod tests {
     fn prepares_a_reduced_selection_after_leaving_the_alternate_screen() {
         let mut app = App::new(1);
         app.show_commit = true;
+        app.show_changes = true;
 
         prepare_inline_exit(&mut app);
 
         assert!(app.inline, "the final frame is drawn into the restored inline screen");
         assert!(
-            !app.show_commit,
+            !app.show_commit && !app.show_changes,
             "alternate-screen panels are omitted from the final frame"
         );
         assert!(!app.show_selection_tail, "only the left selection marker remains");
