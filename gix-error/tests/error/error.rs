@@ -133,6 +133,18 @@ fn from_any_error_with_source() {
 }
 
 #[test]
+fn raising_a_converted_error_preserves_its_source_chain() {
+    let converted = Error::from_error(ErrorWithSource(
+        "object lookup failed",
+        ValidationError::new("invalid object header"),
+    ));
+    let err = Error::from(converted.and_raise(message("revision parsing failed")));
+
+    assert_eq!(err.probable_cause().to_string(), "invalid object header");
+    assert!(err.is_validation());
+}
+
+#[test]
 fn validation_error_displays_input_with_debug_formatting() {
     let err = ValidationError::new_with_input("invalid input", "hello\n ");
     assert_eq!(

@@ -120,6 +120,11 @@ fn classifications_retain_their_types() {
         )))
         .is_not_found()
     );
+
+    let converted = Error::from_error(ErrorWithSource(ValidationError::new("invalid object header")));
+    let raised = Error::from(converted.and_raise(message("revision parsing failed")));
+    assert_eq!(format!("{:#}", raised.probable_cause()), "invalid object header");
+    assert!(raised.is_validation());
 }
 
 #[derive(Debug)]

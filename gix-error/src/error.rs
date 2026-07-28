@@ -118,10 +118,9 @@ mod _impl {
         /// Return the error that is most likely the root cause, based on heuristics.
         /// Note that if there is nothing but this error, i.e. no source or children, this error is returned.
         pub fn probable_cause(&self) -> &(dyn std::error::Error + 'static) {
-            use std::error::Error;
-            self.inner
-                .source()
-                .unwrap_or(self as &(dyn std::error::Error + 'static))
+            std::iter::successors(Some(&self.inner), |err| err.source.as_deref())
+                .find(|err| err.is_probable_cause)
+                .map_or(self as &(dyn std::error::Error + 'static), |err| err.err.as_ref())
         }
 
         /// Return an iterator over all errors in the tree in breadth-first order, starting with this one.
@@ -230,6 +229,9 @@ pub fn can_retry(err: &(dyn std::error::Error + 'static)) -> bool {
 
 fn is_retryable(err: &(dyn std::error::Error + 'static)) -> bool {
     error_chain(err).any(|err| {
+        if let Some(err) = err.downcast_ref::<crate::Error>() {
+            return err.can_retry();
+        }
         if err.is::<crate::RetryableError>() {
             return true;
         }
@@ -253,12 +255,18 @@ fn is_retryable(err: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 fn is_corrupted(err: &(dyn std::error::Error + 'static)) -> bool {
-    error_chain(err).any(|err| err.is::<crate::CorruptionError>())
+    error_chain(err).any(|err| {
+        err.downcast_ref::<crate::Error>()
+            .is_some_and(crate::Error::is_corrupted)
+            || err.is::<crate::CorruptionError>()
+    })
 }
 
 fn is_not_found(err: &(dyn std::error::Error + 'static)) -> bool {
     error_chain(err).any(|err| {
-        err.is::<crate::NotFoundError>()
+        err.downcast_ref::<crate::Error>()
+            .is_some_and(crate::Error::is_not_found)
+            || err.is::<crate::NotFoundError>()
             || err
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
@@ -266,7 +274,11 @@ fn is_not_found(err: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 fn is_validation(err: &(dyn std::error::Error + 'static)) -> bool {
-    error_chain(err).any(|err| err.is::<crate::ValidationError>())
+    error_chain(err).any(|err| {
+        err.downcast_ref::<crate::Error>()
+            .is_some_and(crate::Error::is_validation)
+            || err.is::<crate::ValidationError>()
+    })
 }
 
 fn error_chain<'a>(

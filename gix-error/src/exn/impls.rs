@@ -41,12 +41,15 @@ impl<E: Error + Send + Sync + 'static> Exn<E> {
     /// [source chain of the error]: Error::source
     #[track_caller]
     pub fn new(error: E) -> Self {
-        fn walk_sources(error: &dyn Error, location: &'static Location<'static>) -> Vec<Frame> {
-            if let Some(source) = error.source() {
+        fn walk_sources(
+            source: Option<std::sync::Arc<SourceError>>,
+            location: &'static Location<'static>,
+        ) -> Vec<Frame> {
+            if let Some(source) = source {
                 let children = vec![Frame {
-                    error: Box::new(SourceError::new(source)),
+                    error: Box::new((*source).clone()),
                     location,
-                    children: walk_sources(source, location),
+                    children: walk_sources(source.source.clone(), location),
                 }];
                 children
             } else {
@@ -55,7 +58,8 @@ impl<E: Error + Send + Sync + 'static> Exn<E> {
         }
 
         let location = Location::caller();
-        let children = walk_sources(&error, location);
+        let source = error.source().map(SourceError::new).map(std::sync::Arc::new);
+        let children = walk_sources(source, location);
         let frame = Frame {
             error: Box::new(error),
             location,
@@ -488,11 +492,13 @@ impl fmt::Debug for Something {
 impl Error for Something {}
 
 /// A way to keep all information of errors returned by `source()` chains.
+#[derive(Clone)]
 struct SourceError {
     display: String,
     alt_display: String,
     debug: String,
     alt_debug: String,
+    source: Option<std::sync::Arc<SourceError>>,
 }
 
 impl fmt::Debug for SourceError {
@@ -513,7 +519,11 @@ impl fmt::Display for SourceError {
     }
 }
 
-impl Error for SourceError {}
+impl Error for SourceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.source.as_deref().map(|source| source as &dyn Error)
+    }
+}
 
 impl SourceError {
     fn new(err: &dyn Error) -> Self {
@@ -522,6 +532,7 @@ impl SourceError {
             alt_display: format!("{err:#}"),
             debug: format!("{err:?}"),
             alt_debug: format!("{err:#?}"),
+            source: err.source().map(SourceError::new).map(std::sync::Arc::new),
         }
     }
 }
@@ -531,23 +542,34 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     fn from(mut err: Exn<E>) -> Self {
+        let probable_cause = err.frame.probable_cause().and_then(|cause| {
+            err.frame
+                .iter_frames()
+                .position(|frame| std::ptr::addr_eq(frame, cause))
+        });
         let stack: VecDeque<_> = err.frame.children.drain(..).collect();
         let location = err.frame.location;
         ChainedError {
             err: err.into_box(),
             location,
-            source: recurse_source_frames(stack),
+            is_probable_cause: probable_cause.is_none(),
+            source: recurse_source_frames(stack, probable_cause, 1),
         }
     }
 }
 
-fn recurse_source_frames(mut stack: VecDeque<Frame>) -> Option<Box<ChainedError>> {
+fn recurse_source_frames(
+    mut stack: VecDeque<Frame>,
+    probable_cause: Option<usize>,
+    index: usize,
+) -> Option<Box<ChainedError>> {
     let frame = stack.pop_front()?;
     stack.extend(frame.children);
     Box::new(ChainedError {
         err: frame.error,
         location: frame.location,
-        source: recurse_source_frames(stack),
+        is_probable_cause: probable_cause == Some(index),
+        source: recurse_source_frames(stack, probable_cause, index + 1),
     })
     .into()
 }
