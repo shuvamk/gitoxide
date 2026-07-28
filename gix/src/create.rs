@@ -171,10 +171,12 @@ pub fn into(
             .map_err(|err| io_error(err, "Could not open data", &dot_git))?
             .count();
         if num_entries_in_dot_git != 0 {
-            return Err(gix_error::Error::from_error(gix_error::ValidationError::new_with_input(
-                "Refusing to initialize the non-empty directory as",
-                dot_git.display().to_string(),
-            )));
+            return Err(gix_error::Error::from_error(
+                gix_error::ValidationError::new_with_input(
+                    "Refusing to initialize the non-empty directory as",
+                    dot_git.display().to_string(),
+                ),
+            ));
         }
     }
 
@@ -182,10 +184,12 @@ pub fn into(
         dot_git.push(DOT_GIT_DIR);
 
         if dot_git.is_dir() {
-            return Err(gix_error::Error::from_error(gix_error::ValidationError::new_with_input(
-                "Refusing to initialize an existing directory",
-                dot_git.display().to_string(),
-            )));
+            return Err(gix_error::Error::from_error(
+                gix_error::ValidationError::new_with_input(
+                    "Refusing to initialize an existing directory",
+                    dot_git.display().to_string(),
+                ),
+            ));
         }
     }
     create_dir(&dot_git)?;

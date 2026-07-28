@@ -277,8 +277,7 @@ impl Cache {
     pub(crate) fn stat_options(&self) -> Result<gix_index::entry::stat::Options, config::stat_options::Error> {
         use crate::config::tree::gitoxide;
         Ok(gix_index::entry::stat::Options {
-            trust_ctime: boolean(self, "core.trustCTime", &Core::TRUST_C_TIME, true)
-                .map_err(gix_error::Error::from)?,
+            trust_ctime: boolean(self, "core.trustCTime", &Core::TRUST_C_TIME, true).map_err(gix_error::Error::from)?,
             use_nsec: boolean(self, "gitoxide.core.useNsec", &gitoxide::Core::USE_NSEC, false)
                 .map_err(gix_error::Error::from)?,
             use_stdev: boolean(self, "gitoxide.core.useStdev", &gitoxide::Core::USE_STDEV, false)

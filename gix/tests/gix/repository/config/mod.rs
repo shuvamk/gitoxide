@@ -28,7 +28,9 @@ fn invalid_stat_boolean_is_validation_error() -> crate::Result {
         let mut repo = repo("with-hasconfig");
         repo.config_snapshot_mut().set_raw_value(key, "invalid")?;
         assert!(
-            repo.stat_options().expect_err("invalid value must fail").is_validation(),
+            repo.stat_options()
+                .expect_err("invalid value must fail")
+                .is_validation(),
             "invalid {key} is classified as a validation error"
         );
     }

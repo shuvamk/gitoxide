@@ -1,18 +1,14 @@
 #![allow(clippy::result_large_err)]
 use std::path::Path;
 
+use gix_error::ErrorExt;
 use gix_ref::{
     Category, FullName, Target,
     store::WriteReflog,
     transaction::{PreviousValue, RefEdit},
 };
-use gix_error::ErrorExt;
 
-use crate::{
-    ThreadSafeRepository,
-    bstr::ByteSlice,
-    config::tree::Init,
-};
+use crate::{ThreadSafeRepository, bstr::ByteSlice, config::tree::Init};
 
 /// The name of the branch to use if non is configured via git configuration.
 ///
@@ -57,9 +53,7 @@ impl ThreadSafeRepository {
         let (git_dir, worktree_dir) = path.into_repository_and_work_tree_directories();
         open_options.git_dir_trust = Some(gix_sec::Trust::Full);
         // The repo will use `core.precomposeUnicode` to adjust the value as needed.
-        open_options.current_dir = gix_fs::current_dir(false)
-            .map_err(gix_error::Error::from_error)?
-            .into();
+        open_options.current_dir = gix_fs::current_dir(false).map_err(gix_error::Error::from_error)?.into();
         let repo = ThreadSafeRepository::open_from_paths(git_dir, worktree_dir, open_options)?;
 
         let branch_name = repo
