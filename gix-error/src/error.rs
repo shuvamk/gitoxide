@@ -16,6 +16,16 @@ mod _impl {
         pub fn sources(&self) -> impl Iterator<Item = &(dyn std::error::Error + 'static)> + '_ {
             self.inner.frame().iter_frames().map(|f| f.error() as _)
         }
+
+        /// Return `true` if retrying the failed operation might succeed.
+        pub fn can_retry(&self) -> bool {
+            self.sources().any(super::can_retry)
+        }
+
+        /// Return `true` if malformed or internally inconsistent data caused the failure.
+        pub fn is_corrupted(&self) -> bool {
+            self.sources().any(super::is_corrupted)
+        }
     }
 
     pub(crate) enum Inner {
@@ -104,6 +114,18 @@ mod _impl {
                 err.source()
             })
         }
+
+        /// Return `true` if retrying the failed operation might succeed.
+        pub fn can_retry(&self) -> bool {
+            std::iter::successors(Some(&self.inner), |err| err.source.as_deref())
+                .any(|err| super::can_retry(err.err.as_ref()))
+        }
+
+        /// Return `true` if malformed or internally inconsistent data caused the failure.
+        pub fn is_corrupted(&self) -> bool {
+            std::iter::successors(Some(&self.inner), |err| err.source.as_deref())
+                .any(|err| super::is_corrupted(err.err.as_ref()))
+        }
     }
 
     impl Error {
@@ -145,4 +167,30 @@ mod _impl {
             }
         }
     }
+}
+
+fn can_retry(err: &(dyn std::error::Error + 'static)) -> bool {
+    if err.is::<crate::RetryableError>() {
+        return true;
+    }
+    let Some(err) = err.downcast_ref::<std::io::Error>() else {
+        return false;
+    };
+    use std::io::ErrorKind::*;
+    matches!(
+        err.kind(),
+        Interrupted
+            | UnexpectedEof
+            | OutOfMemory
+            | TimedOut
+            | BrokenPipe
+            | AddrInUse
+            | ConnectionAborted
+            | ConnectionReset
+            | ConnectionRefused
+    )
+}
+
+fn is_corrupted(err: &(dyn std::error::Error + 'static)) -> bool {
+    err.is::<crate::CorruptionError>()
 }

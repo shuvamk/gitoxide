@@ -1,5 +1,5 @@
 use crate::{ErrorWithSource, debug_string, new_tree_error};
-use gix_error::{Error, ErrorExt, ValidationError, message};
+use gix_error::{CorruptionError, Error, ErrorExt, RetryableError, ValidationError, message};
 use std::error::Error as _;
 
 #[test]
@@ -140,4 +140,27 @@ fn validation_error_displays_input_with_debug_formatting() {
         "invalid input: \"hello\\n \"",
         "it won't hide whitespace and other special characters"
     );
+}
+
+#[test]
+fn retryability_is_discovered_in_the_error_chain() {
+    let retryable =
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "too slow").and_raise(message("network operation failed"));
+    assert!(Error::from(retryable).can_retry());
+
+    let permanent = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied")
+        .and_raise(message("network operation failed"));
+    assert!(!Error::from(permanent).can_retry());
+
+    let dependency_specific =
+        RetryableError::new(message("HTTP/2 stream failed")).and_raise(message("network operation failed"));
+    assert!(Error::from(dependency_specific).can_retry());
+}
+
+#[test]
+fn corruption_is_discovered_in_the_error_chain() {
+    let corrupt = CorruptionError::new("checksum mismatch").and_raise(message("failed to open object database"));
+    assert!(Error::from(corrupt).is_corrupted());
+
+    assert!(!Error::from(message("repository was not found").raise()).is_corrupted());
 }
