@@ -1,4 +1,4 @@
-use gix_error::{CorruptionError, Error, ErrorExt, NotFoundError, RetryableError, message};
+use gix_error::{CorruptionError, Error, ErrorExt, NotFoundError, RetryableError, ValidationError, message};
 #[cfg(not(feature = "tree-error"))]
 use gix_error::{Exn, Message};
 use std::error::Error as _;
@@ -110,6 +110,8 @@ fn classifications_retain_their_types() {
 
     let missing = NotFoundError::new("reference does not exist").and_raise(message("failed to resolve HEAD"));
     assert!(Error::from(missing).is_not_found());
+    assert!(Error::from_error(gix_error::ValidationError::new("invalid")).is_validation());
+    assert!(Error::from_error(ErrorWithSource(ValidationError::new("invalid"))).is_validation());
     assert!(Error::from_error(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")).is_not_found());
     assert!(
         Error::from_boxed(Box::new(std::io::Error::new(
@@ -118,4 +120,19 @@ fn classifications_retain_their_types() {
         )))
         .is_not_found()
     );
+}
+
+#[derive(Debug)]
+struct ErrorWithSource<E>(E);
+
+impl<E: std::fmt::Display> std::fmt::Display for ErrorWithSource<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for ErrorWithSource<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
 }

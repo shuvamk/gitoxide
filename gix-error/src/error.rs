@@ -31,6 +31,11 @@ mod _impl {
         pub fn is_not_found(&self) -> bool {
             self.sources().any(super::is_not_found)
         }
+
+        /// Return `true` if invalid input caused the failure.
+        pub fn is_validation(&self) -> bool {
+            self.sources().any(super::is_validation)
+        }
     }
 
     pub(crate) enum Inner {
@@ -143,6 +148,12 @@ mod _impl {
             std::iter::successors(Some(&self.inner), |err| err.source.as_deref())
                 .any(|err| super::is_not_found(err.err.as_ref()))
         }
+
+        /// Return `true` if invalid input caused the failure.
+        pub fn is_validation(&self) -> bool {
+            std::iter::successors(Some(&self.inner), |err| err.source.as_deref())
+                .any(|err| super::is_validation(err.err.as_ref()))
+        }
     }
 
     impl Error {
@@ -214,56 +225,52 @@ impl std::error::Error for BoxedError {
 
 /// Return `true` if `err` or any error in its source chain indicates that retrying might succeed.
 pub fn can_retry(err: &(dyn std::error::Error + 'static)) -> bool {
-    std::iter::successors(Some(err), |err| err.source()).any(is_retryable)
+    is_retryable(err)
 }
 
 fn is_retryable(err: &(dyn std::error::Error + 'static)) -> bool {
-    if let Some(err) = err.downcast_ref::<BoxedError>() {
-        return can_retry(err.0.as_ref());
-    }
-    if err.is::<crate::RetryableError>() {
-        return true;
-    }
-    let Some(err) = err.downcast_ref::<std::io::Error>() else {
-        return false;
-    };
-    use std::io::ErrorKind::*;
-    matches!(
-        err.kind(),
-        Interrupted
-            | UnexpectedEof
-            | OutOfMemory
-            | TimedOut
-            | BrokenPipe
-            | AddrInUse
-            | ConnectionAborted
-            | ConnectionReset
-            | ConnectionRefused
-    )
+    error_chain(err).any(|err| {
+        if err.is::<crate::RetryableError>() {
+            return true;
+        }
+        let Some(err) = err.downcast_ref::<std::io::Error>() else {
+            return false;
+        };
+        use std::io::ErrorKind::*;
+        matches!(
+            err.kind(),
+            Interrupted
+                | UnexpectedEof
+                | OutOfMemory
+                | TimedOut
+                | BrokenPipe
+                | AddrInUse
+                | ConnectionAborted
+                | ConnectionReset
+                | ConnectionRefused
+        )
+    })
 }
 
 fn is_corrupted(err: &(dyn std::error::Error + 'static)) -> bool {
-    if let Some(err) = err.downcast_ref::<BoxedError>() {
-        return std::iter::successors(
-            Some(err.0.as_ref() as &(dyn std::error::Error + 'static)),
-            |err| err.source(),
-        )
-        .any(is_corrupted);
-    }
-    err.is::<crate::CorruptionError>()
+    error_chain(err).any(|err| err.is::<crate::CorruptionError>())
 }
 
 fn is_not_found(err: &(dyn std::error::Error + 'static)) -> bool {
-    if let Some(err) = err.downcast_ref::<BoxedError>() {
-        return std::iter::successors(
-            Some(err.0.as_ref() as &(dyn std::error::Error + 'static)),
-            |err| err.source(),
-        )
-        .any(is_not_found);
-    }
-    if err.is::<crate::NotFoundError>() {
-        return true;
-    }
-    err.downcast_ref::<std::io::Error>()
-        .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+    error_chain(err).any(|err| {
+        err.is::<crate::NotFoundError>()
+            || err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
+fn is_validation(err: &(dyn std::error::Error + 'static)) -> bool {
+    error_chain(err).any(|err| err.is::<crate::ValidationError>())
+}
+
+fn error_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
+    std::iter::successors(Some(err), |err| err.source())
 }
