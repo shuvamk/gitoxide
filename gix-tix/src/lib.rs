@@ -692,7 +692,10 @@ fn draw(
             *commit_message = Some((id, load_commit_message(repository, id)?));
         }
         if let Some(id) = changes_to_load {
-            let loaded = load_changes(repository, id, app.changes_parent)?;
+            repository.object_cache_size(OBJECT_CACHE_SIZE);
+            let loaded = load_changes(repository, id, app.changes_parent);
+            repository.object_cache_size(None);
+            let loaded = loaded?;
             app.changes_parent = loaded.parent.map_or(0, |parent| parent.index);
             *changes = Some((id, app.changes_parent, loaded));
         }
