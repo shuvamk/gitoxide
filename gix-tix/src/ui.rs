@@ -12,6 +12,8 @@ use crate::{
     history::{DecorationKind, Decorations},
 };
 
+const COMPARED_PARENT_COLOR: Color = Color::Cyan;
+
 pub(crate) fn draw(
     frame: &mut Frame<'_>,
     app: &mut App,
@@ -30,6 +32,11 @@ pub(crate) fn draw(
     frame.render_widget(Clear, top_spacer);
     frame.render_widget(Clear, bottom_spacer);
     let full_body = body;
+    let compared_parent = if app.show_changes {
+        changes.and_then(|changes| changes.parent.map(|parent| parent.id))
+    } else {
+        None
+    };
     let changes_pane = app.show_changes.then(|| {
         let desired_height = changes
             .filter(|changes| changes.parent.is_some() || !changes.paths.is_empty())
@@ -118,7 +125,8 @@ pub(crate) fn draw(
                     show_trailers,
                     use_mailmap: app.use_mailmap && !preview_author_copy && copy_feedback != Some(CopyKind::Author),
                     ref_mode,
-                    selected: selected == Some(start + index) && app.show_selection_tail,
+                    selected: (selected == Some(start + index) && app.show_selection_tail)
+                        || compared_parent == Some(row.id),
                     preview_author_copy,
                     copy_feedback: if selected == Some(start + index) {
                         copy_feedback
@@ -151,11 +159,16 @@ pub(crate) fn draw(
         let selected = app.selected == Some(start + index);
         let metadata_width = metadata.width();
         let signature_color = signature_color(visible_rows[index].signature);
-        let style = if selected && app.show_selection_tail {
-            color(signature_color).add_modifier(Modifier::REVERSED)
+        let highlight = if selected && app.show_selection_tail {
+            Some(signature_color)
+        } else if compared_parent == Some(visible_rows[index].id) {
+            Some(COMPARED_PARENT_COLOR)
         } else {
-            Style::default()
+            None
         };
+        let style = highlight.map_or_else(Style::default, |highlight| {
+            color(highlight).add_modifier(Modifier::REVERSED)
+        });
         frame.render_widget(
             Paragraph::new(if selected { "> " } else { "  " }).style(style),
             Rect::new(body.x, y, body.width.min(2), 1),
@@ -172,7 +185,7 @@ pub(crate) fn draw(
                 row_area,
                 lane,
                 graph_offset,
-                selected && app.show_selection_tail,
+                highlight,
                 visible_rows[index].signature,
             );
             let aligned = Rect::new(
@@ -196,7 +209,7 @@ pub(crate) fn draw(
                 row_area,
                 lane,
                 horizontal_offset,
-                selected && app.show_selection_tail,
+                highlight,
                 visible_rows[index].signature,
             );
         }
@@ -270,7 +283,7 @@ pub(crate) fn draw(
                                 parent.total,
                                 parent.id.to_hex_with_len(7)
                             ),
-                            color(Color::Cyan),
+                            color(COMPARED_PARENT_COLOR),
                         ),
                         Span::raw(" · p next parent"),
                     ])),
@@ -707,15 +720,15 @@ fn color_graph(
     area: Rect,
     graph: &str,
     offset: usize,
-    selected: bool,
+    highlight: Option<Color>,
     signature: SignatureState,
 ) {
     for (x, symbol) in graph.chars().skip(offset).take(area.width as usize).enumerate() {
         if symbol.is_whitespace() {
             continue;
         }
-        let style = if selected {
-            color(signature_color(signature)).add_modifier(Modifier::REVERSED)
+        let style = if let Some(highlight) = highlight {
+            color(highlight).add_modifier(Modifier::REVERSED)
         } else if symbol == '●' {
             color(signature_color(signature))
         } else {
@@ -1253,7 +1266,14 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(2, states.len() as u16))?;
         terminal.draw(|frame| {
             for (y, (state, _)) in states.iter().enumerate() {
-                color_graph(frame, Rect::new(0, y as u16, 2, 1), "●─", 0, true, *state);
+                color_graph(
+                    frame,
+                    Rect::new(0, y as u16, 2, 1),
+                    "●─",
+                    0,
+                    Some(signature_color(*state)),
+                    *state,
+                );
             }
         })?;
 
@@ -1386,16 +1406,31 @@ mod tests {
     #[test]
     fn shows_changed_paths_in_a_bottom_pane_below_the_summary() -> Result<(), Box<dyn std::error::Error>> {
         let mut app = App::new(6);
-        app.extend_commits(vec![Commit {
-            id: gix::ObjectId::Sha1([1; 20]),
-            parent_ids: Default::default(),
-            committer_time: gix::date::Time::default(),
-            author: author(b"author", b"author@example.com"),
-            attributions: 0..0,
-            title: "subject".into(),
-            metadata_loaded: true,
-            signature: SignatureState::Unsigned,
-        }]);
+        app.extend_commits(vec![
+            Commit {
+                id: gix::ObjectId::Sha1([1; 20]),
+                parent_ids: [gix::ObjectId::Sha1([2; 20]), gix::ObjectId::Sha1([3; 20])]
+                    .into_iter()
+                    .collect(),
+                committer_time: gix::date::Time::default(),
+                author: author(b"author", b"author@example.com"),
+                attributions: 0..0,
+                title: "merge".into(),
+                metadata_loaded: true,
+                signature: SignatureState::Unsigned,
+            },
+            Commit {
+                id: gix::ObjectId::Sha1([2; 20]),
+                parent_ids: Default::default(),
+                committer_time: gix::date::Time::default(),
+                author: author(b"author", b"author@example.com"),
+                attributions: 0..0,
+                title: "parent".into(),
+                metadata_loaded: true,
+                signature: SignatureState::Unsigned,
+            },
+        ]);
+        complete(&mut app);
         app.update(Action::ToggleChanges);
         let changes = Changes {
             parent: None,
@@ -1509,6 +1544,16 @@ mod tests {
         assert!(
             rendered_line(&terminal, 14).contains("vs parent 1/2 0202020 · p next parent"),
             "merge diffs have their own parent status bar and cycling hint"
+        );
+        let parent = rendered_line(&terminal, 1);
+        let disk_x = parent.find('●').expect("the parent disk is visible") as u16;
+        let hash_x = parent.find("0202020").expect("the parent hash is visible") as u16;
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(disk_x, 1)].fg, COMPARED_PARENT_COLOR);
+        assert!(buffer[(disk_x, 1)].modifier.contains(Modifier::REVERSED));
+        assert!(
+            buffer[(hash_x, 1)].modifier.contains(Modifier::REVERSED),
+            "the compared parent's hash is inverted"
         );
         assert!(
             !rendered_line(&terminal, 15).contains("p next parent"),
