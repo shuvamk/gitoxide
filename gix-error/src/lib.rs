@@ -342,6 +342,7 @@ pub struct Error {
 pub type Result<T = ()> = std::result::Result<T, Error>;
 
 mod error;
+pub use error::can_retry;
 
 /// Various kinds of concrete errors that implement [`std::error::Error`].
 mod concrete;

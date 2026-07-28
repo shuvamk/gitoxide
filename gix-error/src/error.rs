@@ -19,7 +19,7 @@ mod _impl {
 
         /// Return `true` if retrying the failed operation might succeed.
         pub fn can_retry(&self) -> bool {
-            self.sources().any(super::can_retry)
+            self.sources().any(super::is_retryable)
         }
 
         /// Return `true` if malformed or internally inconsistent data caused the failure.
@@ -118,7 +118,7 @@ mod _impl {
         /// Return `true` if retrying the failed operation might succeed.
         pub fn can_retry(&self) -> bool {
             std::iter::successors(Some(&self.inner), |err| err.source.as_deref())
-                .any(|err| super::can_retry(err.err.as_ref()))
+                .any(|err| super::is_retryable(err.err.as_ref()))
         }
 
         /// Return `true` if malformed or internally inconsistent data caused the failure.
@@ -169,7 +169,12 @@ mod _impl {
     }
 }
 
-fn can_retry(err: &(dyn std::error::Error + 'static)) -> bool {
+/// Return `true` if `err` or any error in its source chain indicates that retrying might succeed.
+pub fn can_retry(err: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(err), |err| err.source()).any(is_retryable)
+}
+
+fn is_retryable(err: &(dyn std::error::Error + 'static)) -> bool {
     if err.is::<crate::RetryableError>() {
         return true;
     }
