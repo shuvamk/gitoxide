@@ -498,7 +498,11 @@ fn render_changes(frame: &mut Frame<'_>, area: Rect, changes: &Changes, app: &mu
                     Span::styled(format!("-{removals}"), color(Color::Red)),
                 ]);
             }
-            Line::from(spans)
+            Line::from(spans).style(if app.changes_focused {
+                Style::default()
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            })
         })
         .collect();
     let horizontal_max = lines
@@ -1639,6 +1643,17 @@ mod tests {
             rendered_line(&terminal, 9).contains("A added"),
             "changed paths follow the summary in diff order"
         );
+        let inactive_path = rendered_line(&terminal, 9);
+        let inactive_x = inactive_path.find("A added").expect("changed path is visible") as u16;
+        assert!(
+            terminal.backend().buffer()[(inactive_x, 9)]
+                .modifier
+                .contains(Modifier::DIM)
+                && terminal.backend().buffer()[(inactive_x + 2, 9)]
+                    .modifier
+                    .contains(Modifier::DIM),
+            "the inactive change kind and path are dimmed"
+        );
         assert!(
             !rendered_line(&terminal, 9).contains("+10"),
             "inactive panes do not display a path selection"
@@ -1671,8 +1686,18 @@ mod tests {
         let selected = rendered_line(&terminal, 10);
         assert!(selected.contains("M modified +5 -2"));
         let path_x = selected.find("modified").expect("selected path is visible") as u16;
+        let kind_x = selected.find("M modified").expect("selected kind is visible") as u16;
         let added_x = selected.find("+5").expect("selected additions are visible") as u16;
         let removed_x = selected.find("-2").expect("selected removals are visible") as u16;
+        assert!(
+            !terminal.backend().buffer()[(kind_x, 10)]
+                .modifier
+                .contains(Modifier::DIM)
+                && !terminal.backend().buffer()[(path_x, 10)]
+                    .modifier
+                    .contains(Modifier::DIM),
+            "focused paths use their normal intensity"
+        );
         assert!(
             terminal.backend().buffer()[(path_x, 10)]
                 .modifier
