@@ -38,11 +38,9 @@ pub(crate) fn draw(
         None
     };
     let changes_pane = app.show_changes.then(|| {
-        let desired_height = changes
-            .filter(|changes| changes.parent.is_some() || !changes.paths.is_empty())
-            .map_or(0, |changes| {
-                u16::try_from(changes.paths.len()).unwrap_or(u16::MAX).saturating_add(3)
-            });
+        let desired_height = changes.filter(|changes| changes.is_visible()).map_or(0, |changes| {
+            u16::try_from(changes.paths.len()).unwrap_or(u16::MAX).saturating_add(3)
+        });
         let max_height = frame.area().height / 2;
         let height = desired_height.min(max_height);
         let [commits, changes] = Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(full_body);
@@ -264,32 +262,39 @@ pub(crate) fn draw(
     app.set_horizontal_bounds(content.width as usize, max_offset);
     if let Some((outer, area)) = changes_pane {
         frame.render_widget(Clear, outer);
-        frame.render_widget(Block::new().borders(Borders::TOP), outer);
-        if let Some(changes) = changes {
-            render_changes(frame, area, changes);
+        frame.render_widget(
+            Block::new().borders(Borders::TOP).border_style(if app.changes_focused {
+                Style::default()
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            }),
+            outer,
+        );
+        if let Some(changes) = changes.filter(|changes| changes.is_visible()) {
+            render_changes(frame, area, changes, app);
+            let status = Rect::new(
+                outer.x.saturating_add(2),
+                outer.bottom().saturating_sub(1),
+                outer.width.saturating_sub(4),
+                1,
+            );
+            let mut spans = Vec::new();
             if let Some(parent) = changes.parent {
-                let status = Rect::new(
-                    outer.x.saturating_add(2),
-                    outer.bottom().saturating_sub(1),
-                    outer.width.saturating_sub(4),
-                    1,
-                );
-                frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled(
-                            format!(
-                                "vs parent {}/{} {}",
-                                parent.index + 1,
-                                parent.total,
-                                parent.id.to_hex_with_len(7)
-                            ),
-                            color(COMPARED_PARENT_COLOR),
+                spans.extend([
+                    Span::styled(
+                        format!(
+                            "vs parent {}/{} {}",
+                            parent.index + 1,
+                            parent.total,
+                            parent.id.to_hex_with_len(7)
                         ),
-                        Span::raw(" · p next parent"),
-                    ])),
-                    status,
-                );
+                        color(COMPARED_PARENT_COLOR),
+                    ),
+                    Span::raw(" · p next parent · "),
+                ]);
             }
+            spans.push(Span::raw("↑↓/jk move · h/l pan"));
+            frame.render_widget(Paragraph::new(Line::from(spans)), status);
         }
     }
     if let Some((outer, area)) = commit_pane {
@@ -368,8 +373,9 @@ pub(crate) fn draw(
     frame.render_widget(Paragraph::new(Line::from(footer_spans)), footer);
 }
 
-fn render_changes(frame: &mut Frame<'_>, area: Rect, changes: &Changes) {
-    if changes.parent.is_none() && changes.paths.is_empty() {
+fn render_changes(frame: &mut Frame<'_>, area: Rect, changes: &Changes, app: &mut App) {
+    if !changes.is_visible() || area.height == 0 {
+        app.set_changes_bounds(0, 0, area.width as usize, 0);
         return;
     }
     let mut summary = Vec::new();
@@ -402,6 +408,11 @@ fn render_changes(frame: &mut Frame<'_>, area: Rect, changes: &Changes) {
         Span::raw(" "),
         Span::styled(format!("-{}", changes.lines_removed), color(Color::Red)),
     ]);
+    frame.render_widget(
+        Paragraph::new(Line::from(summary)),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
     let path_capacity = usize::from(area.height.saturating_sub(1));
     let overflow = changes.paths.len() > 1 && changes.paths.len() > path_capacity;
     let visible_paths = if overflow {
@@ -409,32 +420,73 @@ fn render_changes(frame: &mut Frame<'_>, area: Rect, changes: &Changes) {
     } else {
         path_capacity.min(changes.paths.len())
     };
-    let mut lines = Vec::with_capacity(visible_paths + 2);
-    lines.push(Line::from(summary));
-    lines.extend(changes.paths.iter().take(visible_paths).map(|change| {
-        let mut spans = vec![
-            Span::styled(change.kind.letter().to_string(), color(change_color(change.kind))),
-            Span::raw(" "),
-        ];
-        if let Some(source) = &change.source {
-            spans.extend([
-                Span::raw(source.to_str_lossy()),
-                Span::raw(" -> "),
-                Span::raw(change.path.to_str_lossy()),
-            ]);
-        } else {
-            spans.push(Span::raw(change.path.to_str_lossy()));
-        }
-        Line::from(spans)
-    }));
-    if overflow {
-        let hidden = changes.paths.len() - visible_paths;
-        lines.push(Line::styled(
-            format!("… {hidden} {} not shown", if hidden == 1 { "line" } else { "lines" }),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
+    let lines: Vec<_> = changes
+        .paths
+        .iter()
+        .map(|change| {
+            let mut spans = vec![
+                Span::styled(change.kind.letter().to_string(), color(change_color(change.kind))),
+                Span::raw(" "),
+            ];
+            if let Some(source) = &change.source {
+                spans.extend([
+                    Span::raw(source.to_str_lossy()),
+                    Span::raw(" -> "),
+                    Span::raw(change.path.to_str_lossy()),
+                ]);
+            } else {
+                spans.push(Span::raw(change.path.to_str_lossy()));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let horizontal_max = lines
+        .iter()
+        .map(Line::width)
+        .max()
+        .unwrap_or_default()
+        .saturating_sub(area.width as usize);
+    app.set_changes_bounds(
+        visible_paths,
+        changes.paths.len().saturating_sub(visible_paths),
+        area.width as usize,
+        horizontal_max,
+    );
+    let path_area = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        u16::try_from(visible_paths).unwrap_or(u16::MAX),
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(
+            lines
+                .into_iter()
+                .skip(app.changes_offset)
+                .take(visible_paths)
+                .collect::<Vec<_>>(),
+        ))
+        .scroll((0, u16::try_from(app.changes_horizontal_offset).unwrap_or(u16::MAX))),
+        path_area,
+    );
+    let hidden = changes
+        .paths
+        .len()
+        .saturating_sub(app.changes_offset.saturating_add(visible_paths));
+    if overflow && hidden > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!("… {hidden} {} not shown", if hidden == 1 { "line" } else { "lines" }),
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+            Rect::new(
+                area.x,
+                area.bottom().saturating_sub(1),
+                area.width,
+                u16::from(area.height > 0),
+            ),
+        );
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 fn change_color(kind: ChangeKind) -> Color {
@@ -1456,7 +1508,7 @@ mod tests {
                 crate::app::PathChange {
                     kind: ChangeKind::TypeChanged,
                     source: None,
-                    path: "typed".into(),
+                    path: format!("{}tail", "x".repeat(130)).into(),
                 },
             ],
             lines_added: 42,
@@ -1480,6 +1532,10 @@ mod tests {
             "─",
             "the changes pane starts at the screen's halfway point"
         );
+        assert!(
+            terminal.backend().buffer()[(20, 7)].modifier.contains(Modifier::DIM),
+            "the inactive changes border is dimmed"
+        );
         let summary = rendered_line(&terminal, 8);
         assert!(
             summary.contains("A = 1  M = 1  D = 1  R = 1  C = 1  T = 1 · 6 files changed · +42 -17"),
@@ -1497,6 +1553,52 @@ mod tests {
             rendered_line(&terminal, 13).contains("… 2 lines not shown"),
             "the capped pane reports paths that do not fit"
         );
+        assert!(
+            rendered_line(&terminal, 14).contains("↑↓/jk move · h/l pan"),
+            "the changes status advertises its navigation keys"
+        );
+
+        app.update(Action::ToggleChangesFocus);
+        app.update(Action::MoveDown);
+        terminal.draw(|frame| {
+            super::draw(
+                frame,
+                &mut app,
+                &Decorations::new(),
+                &gix::mailmap::Snapshot::default(),
+                None,
+                Some(&changes),
+            );
+        })?;
+        assert!(
+            !terminal.backend().buffer()[(20, 7)].modifier.contains(Modifier::DIM),
+            "the focused changes border uses its normal style"
+        );
+        assert!(rendered_line(&terminal, 9).contains("M modified"));
+        assert!(rendered_line(&terminal, 13).contains("… 1 line not shown"));
+        assert!(rendered_line(&terminal, 14).contains("↑↓/jk move · h/l pan"));
+
+        app.update(Action::Last);
+        app.update(Action::ScrollRight);
+        terminal.draw(|frame| {
+            super::draw(
+                frame,
+                &mut app,
+                &Decorations::new(),
+                &gix::mailmap::Snapshot::default(),
+                None,
+                Some(&changes),
+            );
+        })?;
+        assert_eq!(app.changes_horizontal_offset, 20);
+        assert!(
+            rendered_line(&terminal, 12).contains("tail"),
+            "h/l pans long path rows while the summary remains fixed"
+        );
+        assert!(
+            !rendered_line(&terminal, 13).contains("not shown"),
+            "the overflow indicator disappears at the end"
+        );
 
         let mut short_terminal = Terminal::new(TestBackend::new(120, 8))?;
         short_terminal.draw(|frame| {
@@ -1510,8 +1612,8 @@ mod tests {
             );
         })?;
         assert!(
-            rendered_line(&short_terminal, 5).contains("… 6 lines not shown"),
-            "the final content row reports the number of hidden paths"
+            rendered_line(&short_terminal, 5).contains("… 4 lines not shown"),
+            "the final content row reports paths remaining after the current offset"
         );
 
         let mut merge_changes = changes.clone();
@@ -1535,8 +1637,8 @@ mod tests {
             "parent context no longer crowds the aggregate summary"
         );
         assert!(
-            rendered_line(&terminal, 14).contains("vs parent 1/2 0202020 · p next parent"),
-            "merge diffs have their own parent status bar and cycling hint"
+            rendered_line(&terminal, 14).contains("vs parent 1/2 0202020 · p next parent · ↑↓/jk move · h/l pan"),
+            "merge diffs keep parent controls alongside navigation"
         );
         let parent = rendered_line(&terminal, 1);
         let disk_x = parent.find('●').expect("the parent disk is visible") as u16;

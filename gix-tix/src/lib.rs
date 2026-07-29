@@ -474,13 +474,16 @@ fn event_loop(
             continue;
         }
         let action = action(key);
-        fill_repository.retain = retains_fill_repository(key.kind, action.as_ref());
+        fill_repository.retain = retains_fill_repository(key.kind, action.as_ref(), app.changes_focused);
         if !fill_repository.retain {
             fill_repository.retained = None;
         }
         let Some(action) = action else {
             continue;
         };
+        if action == Action::ToggleChangesFocus && !changes_focusable(changes.as_ref().map(|(_, _, changes)| changes)) {
+            continue;
+        }
         dirty = true;
         urgent = true;
         let effects = app.update(action);
@@ -550,6 +553,8 @@ fn prepare_inline_exit(app: &mut App) {
     app.inline = true;
     app.show_commit = false;
     app.show_changes = false;
+    app.changes_focused = false;
+    app.reset_changes_view();
     app.show_selection_tail = false;
 }
 
@@ -661,6 +666,9 @@ fn draw(
             .as_ref()
             .is_none_or(|(cached, parent, _)| cached != id || *parent != app.changes_parent)
     });
+    if changes_to_load.is_some() {
+        app.reset_changes_view();
+    }
     if !app.show_commit || selected.is_none() {
         *commit_message = None;
     }
@@ -844,6 +852,7 @@ fn action(key: KeyEvent) -> Option<Action> {
         KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift) => {
             Some(Action::PreviewAuthorCopy(key.kind != KeyEventKind::Release))
         }
+        KeyCode::Tab => Some(Action::ToggleChangesFocus),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
         KeyCode::Char('c') => Some(Action::ToggleChanges),
         KeyCode::Char('p') => Some(Action::CycleChangesParent),
@@ -879,6 +888,10 @@ fn action(key: KeyEvent) -> Option<Action> {
     }
 }
 
+fn changes_focusable(changes: Option<&Changes>) -> bool {
+    changes.is_some_and(Changes::is_visible)
+}
+
 fn repeats_viewport(action: &Action) -> bool {
     matches!(
         action,
@@ -893,8 +906,8 @@ fn repeats_viewport(action: &Action) -> bool {
     )
 }
 
-fn retains_fill_repository(kind: KeyEventKind, action: Option<&Action>) -> bool {
-    kind == KeyEventKind::Repeat && action.is_some_and(repeats_viewport)
+fn retains_fill_repository(kind: KeyEventKind, action: Option<&Action>, changes_focused: bool) -> bool {
+    !changes_focused && kind == KeyEventKind::Repeat && action.is_some_and(repeats_viewport)
 }
 
 #[cfg(test)]
@@ -1070,6 +1083,10 @@ mod tests {
     #[test]
     fn maps_navigation_and_control_c() {
         assert_eq!(
+            action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(Action::ToggleChangesFocus)
+        );
+        assert_eq!(
             action(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
             Some(Action::PageUp)
         );
@@ -1182,17 +1199,51 @@ mod tests {
     }
 
     #[test]
+    fn only_visible_changes_can_take_focus() {
+        assert!(!changes_focusable(None));
+        assert!(!changes_focusable(Some(&Changes::default())));
+        let changes = Changes {
+            paths: vec![PathChange {
+                kind: ChangeKind::Modified,
+                source: None,
+                path: "file".into(),
+            }],
+            ..Changes::default()
+        };
+        assert!(changes_focusable(Some(&changes)));
+    }
+
+    #[test]
     fn retains_the_fill_repository_only_for_repeated_viewport_navigation() {
-        assert!(retains_fill_repository(KeyEventKind::Repeat, Some(&Action::MoveDown)));
-        assert!(!retains_fill_repository(KeyEventKind::Press, Some(&Action::MoveDown)));
-        assert!(!retains_fill_repository(KeyEventKind::Release, Some(&Action::MoveDown)));
-        assert!(!retains_fill_repository(
+        assert!(retains_fill_repository(
             KeyEventKind::Repeat,
-            Some(&Action::ScrollRight)
+            Some(&Action::MoveDown),
+            false
         ));
         assert!(!retains_fill_repository(
             KeyEventKind::Repeat,
-            Some(&Action::ToggleDate)
+            Some(&Action::MoveDown),
+            true
+        ));
+        assert!(!retains_fill_repository(
+            KeyEventKind::Press,
+            Some(&Action::MoveDown),
+            false
+        ));
+        assert!(!retains_fill_repository(
+            KeyEventKind::Release,
+            Some(&Action::MoveDown),
+            false
+        ));
+        assert!(!retains_fill_repository(
+            KeyEventKind::Repeat,
+            Some(&Action::ScrollRight),
+            false
+        ));
+        assert!(!retains_fill_repository(
+            KeyEventKind::Repeat,
+            Some(&Action::ToggleDate),
+            false
         ));
     }
 
@@ -1201,6 +1252,7 @@ mod tests {
         let mut app = App::new(1);
         app.show_commit = true;
         app.show_changes = true;
+        app.changes_focused = true;
 
         prepare_inline_exit(&mut app);
 
@@ -1209,6 +1261,7 @@ mod tests {
             !app.show_commit && !app.show_changes,
             "alternate-screen panels are omitted from the final frame"
         );
+        assert!(!app.changes_focused, "the hidden panel no longer owns focus");
         assert!(!app.show_selection_tail, "only the left selection marker remains");
     }
 
