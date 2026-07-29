@@ -43,7 +43,7 @@ pub(crate) fn draw(
             .map_or(0, |changes| {
                 u16::try_from(changes.paths.len()).unwrap_or(u16::MAX).saturating_add(3)
             });
-        let max_height = full_body.height.saturating_sub(1).max(full_body.height.min(4));
+        let max_height = frame.area().height / 2;
         let height = desired_height.min(max_height);
         let [commits, changes] = Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(full_body);
         body = commits;
@@ -1476,26 +1476,26 @@ mod tests {
         })?;
 
         assert_eq!(
-            terminal.backend().buffer()[(20, 6)].symbol(),
+            terminal.backend().buffer()[(20, 7)].symbol(),
             "─",
-            "the changes pane has a top border"
+            "the changes pane starts at the screen's halfway point"
         );
-        let summary = rendered_line(&terminal, 7);
+        let summary = rendered_line(&terminal, 8);
         assert!(
             summary.contains("A = 1  M = 1  D = 1  R = 1  C = 1  T = 1 · 6 files changed · +42 -17"),
             "the pane starts with nonzero status and line aggregates"
         );
         let added_x = summary.find("A = 1").expect("added aggregate is visible") as u16;
         let deleted_x = summary.find("D = 1").expect("deleted aggregate is visible") as u16;
-        assert_eq!(terminal.backend().buffer()[(added_x, 7)].fg, Color::Green);
-        assert_eq!(terminal.backend().buffer()[(deleted_x, 7)].fg, Color::Red);
+        assert_eq!(terminal.backend().buffer()[(added_x, 8)].fg, Color::Green);
+        assert_eq!(terminal.backend().buffer()[(deleted_x, 8)].fg, Color::Red);
         assert!(
-            rendered_line(&terminal, 8).contains("A added"),
+            rendered_line(&terminal, 9).contains("A added"),
             "changed paths follow the summary in diff order"
         );
         assert!(
-            rendered_line(&terminal, 13).contains("T typed"),
-            "the pane grows to show every changed path"
+            rendered_line(&terminal, 13).contains("… 2 lines not shown"),
+            "the capped pane reports paths that do not fit"
         );
 
         let mut short_terminal = Terminal::new(TestBackend::new(120, 8))?;
@@ -1510,7 +1510,7 @@ mod tests {
             );
         })?;
         assert!(
-            rendered_line(&short_terminal, 5).contains("… 4 lines not shown"),
+            rendered_line(&short_terminal, 5).contains("… 6 lines not shown"),
             "the final content row reports the number of hidden paths"
         );
 
@@ -1531,7 +1531,7 @@ mod tests {
             );
         })?;
         assert!(
-            rendered_line(&terminal, 7).starts_with("  A = 1"),
+            rendered_line(&terminal, 8).starts_with("  A = 1"),
             "parent context no longer crowds the aggregate summary"
         );
         assert!(
