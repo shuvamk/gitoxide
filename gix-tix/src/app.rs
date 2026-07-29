@@ -520,7 +520,12 @@ impl App {
                     self.reset_changes_view();
                 }
             }
-            Action::ToggleChangesFocus if self.show_changes => self.changes_focused = !self.changes_focused,
+            Action::ToggleChangesFocus if self.show_changes => {
+                self.changes_focused = !self.changes_focused;
+                if self.changes_focused {
+                    self.clear_preview_author_copy();
+                }
+            }
             Action::CycleChangesParent => {
                 if self.show_changes {
                     self.changes_parent = self.changes_parent.saturating_add(1);
@@ -547,14 +552,13 @@ impl App {
                     return vec![Effect::VerifySignatures(ids)];
                 }
             }
+            Action::PreviewAuthorCopy(_) if self.changes_focused => {}
             Action::PreviewAuthorCopy(value) => {
                 if value && !self.preview_author_copy {
                     self.reachability_anchor = self.selected.and_then(|index| self.rows.get(index)).map(|row| row.id);
                     self.compute_reachable_rows();
                 } else if !value {
-                    self.reachability_anchor = None;
-                    self.junction_parent = None;
-                    self.reachable_rows = None;
+                    self.clear_preview_author_copy();
                 }
                 self.preview_author_copy = value;
             }
@@ -672,10 +676,7 @@ impl App {
         self.changes_focused = false;
         self.reset_changes_view();
         self.follow_tail = false;
-        self.preview_author_copy = false;
-        self.reachability_anchor = None;
-        self.junction_parent = None;
-        self.reachable_rows = None;
+        self.clear_preview_author_copy();
         self.signature_failures = 0;
         self.signature_verification_running = false;
     }
@@ -705,6 +706,13 @@ impl App {
             self.changes_selected.saturating_sub(distance)
         };
         self.ensure_changes_visible();
+    }
+
+    fn clear_preview_author_copy(&mut self) {
+        self.preview_author_copy = false;
+        self.reachability_anchor = None;
+        self.junction_parent = None;
+        self.reachable_rows = None;
     }
 
     fn ensure_changes_visible(&mut self) {
@@ -1471,6 +1479,28 @@ mod tests {
         app.update(Action::PreviewAuthorCopy(false));
         app.update(Action::MoveUp);
         assert_eq!(app.rows[app.selected.expect("normal navigation is restored")].id, id(2));
+    }
+
+    #[test]
+    fn changes_focus_clears_and_ignores_shift() {
+        let mut app = App::new(2);
+        app.extend_commits(vec![row_with_parents(2, &[1]), row(1)]);
+        complete(&mut app);
+
+        app.update(Action::PreviewAuthorCopy(true));
+        assert!(app.preview_author_copy && app.reachable_rows.is_some());
+
+        app.update(Action::ToggleChangesFocus);
+        assert!(
+            app.changes_focused && !app.preview_author_copy && app.reachable_rows.is_none(),
+            "entering the changes pane clears transient history navigation"
+        );
+
+        app.update(Action::PreviewAuthorCopy(true));
+        assert!(
+            !app.preview_author_copy && app.reachable_rows.is_none(),
+            "the inactive history pane ignores Shift"
+        );
     }
 
     #[test]

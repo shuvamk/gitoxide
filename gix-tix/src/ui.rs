@@ -413,6 +413,11 @@ pub(crate) fn draw(
     }
     footer_spans.push(Span::raw(" · q quit"));
     frame.render_widget(Paragraph::new(Line::from(footer_spans)), footer);
+    if app.changes_focused {
+        frame
+            .buffer_mut()
+            .set_style(body, Style::default().add_modifier(Modifier::DIM));
+    }
 }
 
 fn render_changes(frame: &mut Frame<'_>, area: Rect, changes: &Changes, app: &mut App) {
@@ -1622,6 +1627,11 @@ mod tests {
             terminal.backend().buffer()[(20, 7)].modifier.contains(Modifier::DIM),
             "the inactive changes border is dimmed"
         );
+        assert!(
+            !terminal.backend().buffer()[(5, 0)].modifier.contains(Modifier::DIM)
+                && !terminal.backend().buffer()[(2, 15)].modifier.contains(Modifier::DIM),
+            "the focused history and its status use their normal intensity"
+        );
         let summary = rendered_line(&terminal, 8);
         assert!(
             summary.contains("A = 1  M = 1  D = 1  R = 1  C = 1  T = 1 · 6 files changed · +42 -17"),
@@ -1684,6 +1694,11 @@ mod tests {
         assert!(
             !terminal.backend().buffer()[(20, 7)].modifier.contains(Modifier::DIM),
             "the focused changes border uses its normal style"
+        );
+        assert!(
+            terminal.backend().buffer()[(5, 0)].modifier.contains(Modifier::DIM)
+                && !terminal.backend().buffer()[(2, 15)].modifier.contains(Modifier::DIM),
+            "the inactive history is dimmed without dimming the main status"
         );
         assert!(
             !terminal.backend().buffer()[(added_x, 8)]
