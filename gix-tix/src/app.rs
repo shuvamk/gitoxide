@@ -556,6 +556,7 @@ impl App {
                     return vec![Effect::VerifySignatures(ids)];
                 }
             }
+            Action::Cancel | Action::Quit if self.changes_focused => self.focus_history(),
             Action::PreviewAuthorCopy(_) if self.changes_focused => {}
             Action::PreviewAuthorCopy(value) => {
                 if value && !self.preview_author_copy {
@@ -677,11 +678,10 @@ impl App {
         self.estimated_lane_width = 0;
         self.show_hidden = show_hidden;
         self.horizontal_offset = 0;
-        self.changes_focused = false;
+        self.focus_history();
         self.reset_changes_view();
         self.follow_tail = false;
         self.clear_preview_author_copy();
-        self.focus_feedback = None;
         self.signature_failures = 0;
         self.signature_verification_running = false;
     }
@@ -718,6 +718,11 @@ impl App {
         self.reachability_anchor = None;
         self.junction_parent = None;
         self.reachable_rows = None;
+    }
+
+    pub(crate) fn focus_history(&mut self) {
+        self.changes_focused = false;
+        self.focus_feedback = None;
     }
 
     fn ensure_changes_visible(&mut self) {
@@ -1781,6 +1786,26 @@ mod tests {
             1,
             "completion racing cancellation keeps already displayed commits"
         );
+    }
+
+    #[test]
+    fn q_and_escape_leave_changes_before_affecting_history() {
+        let mut app = App::new(1);
+        app.update(Action::ToggleChangesFocus);
+
+        assert!(app.update(Action::Quit).is_empty());
+        assert!(!app.changes_focused, "q returns focus to history");
+
+        app.update(Action::ToggleChangesFocus);
+        assert!(app.update(Action::Cancel).is_empty());
+        assert!(!app.changes_focused, "Escape returns focus to history");
+        assert_eq!(
+            app.state,
+            State::Loading,
+            "Escape does not cancel while changes had focus"
+        );
+
+        assert_eq!(app.update(Action::Cancel), vec![Effect::Cancel]);
     }
 
     #[test]

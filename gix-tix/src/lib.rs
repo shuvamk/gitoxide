@@ -556,12 +556,18 @@ fn event_loop(
                         .context("selected path no longer has diff resources")
                         .and_then(|(change, path)| prepare_file_diff(&repository_path, change, path))
                         .and_then(|diff| match diff {
-                            FileDiff::External(command) => run_external_diff(terminal, command, enhanced_keyboard),
-                            FileDiff::Pager { command, diff } => run_pager(terminal, command, &diff, enhanced_keyboard),
+                            FileDiff::External(command) => {
+                                run_external_diff(terminal, command, enhanced_keyboard).map(|()| false)
+                            }
+                            FileDiff::Pager { command, diff } => {
+                                run_pager(terminal, command, &diff, enhanced_keyboard).map(|()| false)
+                            }
                             FileDiff::BuiltIn(diff) => show_builtin_diff(terminal, &diff),
                         });
-                    if let Err(err) = result {
-                        app.diff_error = Some(format!("{err:#}"));
+                    match result {
+                        Ok(true) => app.focus_history(),
+                        Err(err) => app.diff_error = Some(format!("{err:#}")),
+                        Ok(false) => {}
                     }
                 }
                 Effect::VerifySignatures(ids) => {
@@ -1044,7 +1050,7 @@ fn pager_needs_acknowledgement(elapsed: Duration) -> bool {
     elapsed <= IMMEDIATE_PAGER_EXIT
 }
 
-fn show_builtin_diff(terminal: &mut ratatui::DefaultTerminal, diff: &BuiltInDiff) -> Result<()> {
+fn show_builtin_diff(terminal: &mut ratatui::DefaultTerminal, diff: &BuiltInDiff) -> Result<bool> {
     let mut offset = 0usize;
     let mut horizontal_offset = 0usize;
     let mut focused = true;
@@ -1074,7 +1080,8 @@ fn show_builtin_diff(terminal: &mut ratatui::DefaultTerminal, diff: &BuiltInDiff
             _ => continue,
         };
         match action(key) {
-            Some(Action::OpenDiff | Action::Quit | Action::Cancel) => return Ok(()),
+            Some(Action::OpenDiff) => return Ok(false),
+            Some(Action::Quit | Action::Cancel) => return Ok(true),
             Some(Action::MoveUp) => offset = offset.saturating_sub(1),
             Some(Action::MoveDown) => offset = offset.saturating_add(1).min(max),
             Some(Action::PageUp) => offset = offset.saturating_sub(page),

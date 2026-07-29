@@ -364,6 +364,9 @@ pub(crate) fn draw(
             None => Span::raw(" · Tab switch"),
         });
     }
+    if app.changes_focused {
+        footer_spans.push(Span::raw(" · q/Esc history"));
+    }
     footer_spans.extend([Span::raw(" · "), toggle("[ align", app.align_metadata)]);
     footer_spans.extend([Span::raw(" · "), toggle("o commit", app.show_commit)]);
     footer_spans.extend([Span::raw(" · "), toggle("c changes", app.show_changes)]);
@@ -415,10 +418,12 @@ pub(crate) fn draw(
             Span::styled("●", color(Color::Green)),
         ]);
     }
-    if app.state == State::Loading {
-        footer_spans.push(Span::raw(" · Esc cancel"));
+    if !app.changes_focused {
+        if app.state == State::Loading {
+            footer_spans.push(Span::raw(" · Esc cancel"));
+        }
+        footer_spans.push(Span::raw(" · q quit"));
     }
-    footer_spans.push(Span::raw(" · q quit"));
     frame.render_widget(Paragraph::new(Line::from(footer_spans)), footer);
     if app.changes_focused {
         frame
@@ -1709,6 +1714,7 @@ mod tests {
             "the inactive history is dimmed without dimming the main status"
         );
         assert!(rendered_line(&terminal, 15).contains("Tab → changes"));
+        assert!(rendered_line(&terminal, 15).contains("q/Esc history"));
         terminal.draw(|frame| {
             super::draw(
                 frame,
