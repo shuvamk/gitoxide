@@ -69,6 +69,7 @@ pub(crate) struct PathChange {
     pub kind: ChangeKind,
     pub source: Option<BString>,
     pub path: BString,
+    pub lines: Option<(u32, u32)>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -250,6 +251,7 @@ pub(crate) struct App {
     pub show_commit: bool,
     pub show_changes: bool,
     pub(crate) changes_focused: bool,
+    pub(crate) changes_selected: usize,
     pub(crate) changes_offset: usize,
     pub(crate) changes_horizontal_offset: usize,
     pub(crate) changes_parent: usize,
@@ -300,6 +302,7 @@ impl App {
             show_commit: false,
             show_changes: true,
             changes_focused: false,
+            changes_selected: 0,
             changes_offset: 0,
             changes_horizontal_offset: 0,
             changes_parent: 0,
@@ -454,9 +457,15 @@ impl App {
             Action::HalfPageDown => self.move_selection((self.viewport_rows / 2).max(1), true),
             Action::PageUp => self.move_selection(self.viewport_rows.max(1), false),
             Action::PageDown => self.move_selection(self.viewport_rows.max(1), true),
-            Action::First if self.changes_focused => self.changes_offset = 0,
+            Action::First if self.changes_focused => {
+                self.changes_selected = 0;
+                self.ensure_changes_visible();
+            }
             Action::First => self.select(0),
-            Action::Last if self.changes_focused => self.changes_offset = self.changes_max,
+            Action::Last if self.changes_focused => {
+                self.changes_selected = self.changes_max;
+                self.ensure_changes_visible();
+            }
             Action::Last if !self.rows.is_empty() => {
                 let previous = self.selected;
                 self.selected = Some(self.rows.len() - 1);
@@ -677,11 +686,23 @@ impl App {
     }
 
     fn move_changes(&mut self, distance: usize, down: bool) {
-        self.changes_offset = if down {
-            self.changes_offset.saturating_add(distance).min(self.changes_max)
+        self.changes_selected = if down {
+            self.changes_selected.saturating_add(distance).min(self.changes_max)
         } else {
-            self.changes_offset.saturating_sub(distance)
+            self.changes_selected.saturating_sub(distance)
         };
+        self.ensure_changes_visible();
+    }
+
+    fn ensure_changes_visible(&mut self) {
+        if self.changes_selected < self.changes_offset {
+            self.changes_offset = self.changes_selected;
+        } else if self.changes_selected >= self.changes_offset.saturating_add(self.changes_page) {
+            self.changes_offset = self.changes_selected + 1 - self.changes_page;
+        }
+        self.changes_offset = self
+            .changes_offset
+            .min(self.changes_max.saturating_add(1).saturating_sub(self.changes_page));
     }
 
     fn pan_changes(&mut self, right: bool) {
@@ -847,19 +868,26 @@ impl App {
     pub(crate) fn set_changes_bounds(
         &mut self,
         page: usize,
-        max: usize,
+        len: usize,
         horizontal_page: usize,
         horizontal_max: usize,
     ) {
         self.changes_page = page.max(1);
-        self.changes_max = max;
-        self.changes_offset = self.changes_offset.min(max);
+        self.changes_max = len.saturating_sub(1);
+        if len == 0 {
+            self.changes_selected = 0;
+            self.changes_offset = 0;
+        } else {
+            self.changes_selected = self.changes_selected.min(self.changes_max);
+            self.ensure_changes_visible();
+        }
         self.changes_horizontal_page = horizontal_page.max(1);
         self.changes_horizontal_max = horizontal_max;
         self.changes_horizontal_offset = self.changes_horizontal_offset.min(horizontal_max);
     }
 
     pub(crate) fn reset_changes_view(&mut self) {
+        self.changes_selected = 0;
         self.changes_offset = 0;
         self.changes_horizontal_offset = 0;
     }
@@ -1521,24 +1549,24 @@ mod tests {
     fn focused_changes_redirect_navigation_to_the_path_viewport() {
         let mut app = App::new(2);
         app.extend_commits((1..=3).map(row).collect::<Vec<_>>());
-        app.set_changes_bounds(4, 9, 20, 45);
+        app.set_changes_bounds(4, 10, 20, 45);
         app.update(Action::ToggleChangesFocus);
 
         app.update(Action::MoveDown);
-        assert_eq!(app.changes_offset, 1);
+        assert_eq!((app.changes_selected, app.changes_offset), (1, 0));
         assert_eq!(
             app.selected,
             Some(0),
-            "path scrolling leaves commit selection untouched"
+            "path selection leaves commit selection untouched"
         );
         app.update(Action::PageDown);
-        assert_eq!(app.changes_offset, 5);
+        assert_eq!((app.changes_selected, app.changes_offset), (5, 2));
         app.update(Action::HalfPageDown);
-        assert_eq!(app.changes_offset, 7);
+        assert_eq!((app.changes_selected, app.changes_offset), (7, 4));
         app.update(Action::Last);
-        assert_eq!(app.changes_offset, 9);
+        assert_eq!((app.changes_selected, app.changes_offset), (9, 6));
         app.update(Action::First);
-        assert_eq!(app.changes_offset, 0);
+        assert_eq!((app.changes_selected, app.changes_offset), (0, 0));
 
         app.update(Action::ScrollRight);
         app.update(Action::ScrollRight);
@@ -1550,6 +1578,7 @@ mod tests {
 
         app.update(Action::ToggleChanges);
         assert!(!app.changes_focused, "closing the panel returns focus to history");
+        assert_eq!(app.changes_selected, 0);
         assert_eq!(app.changes_offset, 0);
         assert_eq!(app.changes_horizontal_offset, 0);
     }
@@ -1656,13 +1685,14 @@ mod tests {
         complete(&mut app);
         app.update(Action::MoveDown);
         let selected = app.rows[app.selected.expect("a row is selected")].id;
-        app.set_changes_bounds(1, 2, 1, 2);
+        app.set_changes_bounds(1, 3, 1, 2);
         app.update(Action::ToggleChangesFocus);
         app.update(Action::MoveDown);
         app.update(Action::ScrollRight);
 
         app.reload(true);
         assert!(!app.changes_focused, "reload returns focus to history");
+        assert_eq!(app.changes_selected, 0);
         assert_eq!((app.changes_offset, app.changes_horizontal_offset), (0, 0));
         app.extend_commits(vec![row(1), row(2), row(3)]);
         complete(&mut app);

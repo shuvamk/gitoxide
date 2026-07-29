@@ -798,18 +798,24 @@ fn load_changes(repository: &gix::Repository, id: gix::ObjectId, requested_paren
         if is_tree {
             continue;
         }
-        if let Some(counts) = change
+        let lines = change
             .attach(repository, repository)
             .diff(&mut resource_cache)
             .context("could not prepare line diff")?
             .line_counts()
             .context("could not count changed lines")?
-        {
-            out.lines_added += u64::from(counts.insertions);
-            out.lines_removed += u64::from(counts.removals);
+            .map(|counts| (counts.insertions, counts.removals));
+        if let Some((insertions, removals)) = lines {
+            out.lines_added += u64::from(insertions);
+            out.lines_removed += u64::from(removals);
         }
         resource_cache.clear_resource_cache_keep_allocation();
-        out.paths.push(PathChange { kind, source, path });
+        out.paths.push(PathChange {
+            kind,
+            source,
+            path,
+            lines,
+        });
     }
     Ok(out)
 }
@@ -941,6 +947,7 @@ mod tests {
                     kind: ChangeKind::Added,
                     source: None,
                     path: "root".into(),
+                    lines: Some((1, 0)),
                 }],
                 lines_added: 1,
                 lines_removed: 0,
@@ -955,6 +962,7 @@ mod tests {
                 kind: ChangeKind::Added,
                 source: None,
                 path: "topic".into(),
+                lines: Some((1, 0)),
             }],
             "single-parent changes retain diff order and status"
         );
@@ -976,6 +984,7 @@ mod tests {
                 kind: ChangeKind::Added,
                 source: None,
                 path: "merged".into(),
+                lines: Some((1, 0)),
             }],
             "the default merge diff compares the result to its first parent"
         );
@@ -995,6 +1004,7 @@ mod tests {
                 kind: ChangeKind::Added,
                 source: None,
                 path: "main".into(),
+                lines: Some((1, 0)),
             }],
             "later parents can be selected independently"
         );
@@ -1207,6 +1217,7 @@ mod tests {
                 kind: ChangeKind::Modified,
                 source: None,
                 path: "file".into(),
+                lines: None,
             }],
             ..Changes::default()
         };

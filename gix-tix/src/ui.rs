@@ -423,19 +423,34 @@ fn render_changes(frame: &mut Frame<'_>, area: Rect, changes: &Changes, app: &mu
     let lines: Vec<_> = changes
         .paths
         .iter()
-        .map(|change| {
+        .enumerate()
+        .map(|(index, change)| {
+            let selected = app.changes_focused && index == app.changes_selected;
+            let path_style = if selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
             let mut spans = vec![
                 Span::styled(change.kind.letter().to_string(), color(change_color(change.kind))),
                 Span::raw(" "),
             ];
             if let Some(source) = &change.source {
                 spans.extend([
-                    Span::raw(source.to_str_lossy()),
-                    Span::raw(" -> "),
-                    Span::raw(change.path.to_str_lossy()),
+                    Span::styled(source.to_str_lossy(), path_style),
+                    Span::styled(" -> ", path_style),
+                    Span::styled(change.path.to_str_lossy(), path_style),
                 ]);
             } else {
-                spans.push(Span::raw(change.path.to_str_lossy()));
+                spans.push(Span::styled(change.path.to_str_lossy(), path_style));
+            }
+            if selected && let Some((insertions, removals)) = change.lines {
+                spans.extend([
+                    Span::raw(" "),
+                    Span::styled(format!("+{insertions}"), color(Color::Green)),
+                    Span::raw(" "),
+                    Span::styled(format!("-{removals}"), color(Color::Red)),
+                ]);
             }
             Line::from(spans)
         })
@@ -446,12 +461,7 @@ fn render_changes(frame: &mut Frame<'_>, area: Rect, changes: &Changes, app: &mu
         .max()
         .unwrap_or_default()
         .saturating_sub(area.width as usize);
-    app.set_changes_bounds(
-        visible_paths,
-        changes.paths.len().saturating_sub(visible_paths),
-        area.width as usize,
-        horizontal_max,
-    );
+    app.set_changes_bounds(visible_paths, changes.paths.len(), area.width as usize, horizontal_max);
     let path_area = Rect::new(
         area.x,
         area.y.saturating_add(1),
@@ -1484,31 +1494,37 @@ mod tests {
                     kind: ChangeKind::Added,
                     source: None,
                     path: "added".into(),
+                    lines: Some((10, 0)),
                 },
                 crate::app::PathChange {
                     kind: ChangeKind::Modified,
                     source: None,
                     path: "modified".into(),
+                    lines: Some((5, 2)),
                 },
                 crate::app::PathChange {
                     kind: ChangeKind::Deleted,
                     source: None,
                     path: "deleted".into(),
+                    lines: Some((0, 7)),
                 },
                 crate::app::PathChange {
                     kind: ChangeKind::Renamed,
                     source: Some("old".into()),
                     path: "new".into(),
+                    lines: Some((3, 3)),
                 },
                 crate::app::PathChange {
                     kind: ChangeKind::Copied,
                     source: Some("source".into()),
                     path: "copy".into(),
+                    lines: Some((0, 0)),
                 },
                 crate::app::PathChange {
                     kind: ChangeKind::TypeChanged,
                     source: None,
                     path: format!("{}tail", "x".repeat(130)).into(),
+                    lines: Some((24, 5)),
                 },
             ],
             lines_added: 42,
@@ -1550,6 +1566,10 @@ mod tests {
             "changed paths follow the summary in diff order"
         );
         assert!(
+            !rendered_line(&terminal, 9).contains("+10"),
+            "inactive panes do not display a path selection"
+        );
+        assert!(
             rendered_line(&terminal, 13).contains("… 2 lines not shown"),
             "the capped pane reports paths that do not fit"
         );
@@ -1574,8 +1594,30 @@ mod tests {
             !terminal.backend().buffer()[(20, 7)].modifier.contains(Modifier::DIM),
             "the focused changes border uses its normal style"
         );
-        assert!(rendered_line(&terminal, 9).contains("M modified"));
-        assert!(rendered_line(&terminal, 13).contains("… 1 line not shown"));
+        let selected = rendered_line(&terminal, 10);
+        assert!(selected.contains("M modified +5 -2"));
+        let path_x = selected.find("modified").expect("selected path is visible") as u16;
+        let added_x = selected.find("+5").expect("selected additions are visible") as u16;
+        let removed_x = selected.find("-2").expect("selected removals are visible") as u16;
+        assert!(
+            terminal.backend().buffer()[(path_x, 10)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the selected filepath is inverted"
+        );
+        assert_eq!(terminal.backend().buffer()[(added_x, 10)].fg, Color::Green);
+        assert_eq!(terminal.backend().buffer()[(removed_x, 10)].fg, Color::Red);
+        assert!(
+            !terminal.backend().buffer()[(added_x, 10)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the diff-line suffix keeps its normal background"
+        );
+        assert!(
+            !rendered_line(&terminal, 9).contains("+10"),
+            "only the selected path displays its line counts"
+        );
+        assert!(rendered_line(&terminal, 13).contains("… 2 lines not shown"));
         assert!(rendered_line(&terminal, 14).contains("↑↓/jk move · h/l pan"));
 
         app.update(Action::Last);
@@ -1612,8 +1654,8 @@ mod tests {
             );
         })?;
         assert!(
-            rendered_line(&short_terminal, 5).contains("… 4 lines not shown"),
-            "the final content row reports paths remaining after the current offset"
+            rendered_line(&short_terminal, 5).contains("… 1 line not shown"),
+            "the overflow count follows the selected final path when no path row fits"
         );
 
         let mut merge_changes = changes.clone();
