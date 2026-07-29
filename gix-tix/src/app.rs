@@ -284,7 +284,7 @@ impl App {
             show_hidden: false,
             align_metadata: true,
             show_commit: false,
-            show_changes: false,
+            show_changes: true,
             changes_parent: 0,
             show_selection_tail: true,
             inline: false,
@@ -1440,6 +1440,7 @@ mod tests {
     fn toggles_metadata_columns() {
         let mut app = App::new(1);
         assert!(app.show_trailers, "trailer attribution is visible by default");
+        assert!(app.show_changes, "changed paths are visible by default");
 
         app.update(Action::ToggleDate);
         app.update(Action::ToggleEmail);
@@ -1449,8 +1450,8 @@ mod tests {
         app.update(Action::ToggleRefs);
         app.update(Action::ToggleAlign);
         app.update(Action::ToggleCommit);
-        app.update(Action::ToggleChanges);
         app.update(Action::CycleChangesParent);
+        app.update(Action::ToggleChanges);
 
         assert!(!app.show_committer_date);
         assert!(app.show_emails);
@@ -1464,7 +1465,7 @@ mod tests {
         assert_eq!(app.ref_mode, RefMode::Default);
         assert!(!app.align_metadata);
         assert!(app.show_commit);
-        assert!(app.show_changes);
+        assert!(!app.show_changes);
         assert_eq!(app.changes_parent, 1);
         app.update(Action::ToggleAlign);
         assert!(app.align_metadata);

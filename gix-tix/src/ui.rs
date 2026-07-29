@@ -1040,12 +1040,6 @@ mod tests {
         for x in commit..commit + "o commit".len() {
             expected[(x as u16, 1)].set_style(Style::default().add_modifier(Modifier::DIM));
         }
-        let changes = footer_text[..footer_text.find("c changes").expect("the changes toggle is present")]
-            .chars()
-            .count();
-        for x in changes..changes + "c changes".len() {
-            expected[(x as u16, 1)].set_style(Style::default().add_modifier(Modifier::DIM));
-        }
         let email = footer_text[..footer_text.find("e emails").expect("the email toggle is present")]
             .chars()
             .count();
@@ -1431,7 +1425,6 @@ mod tests {
             },
         ]);
         complete(&mut app);
-        app.update(Action::ToggleChanges);
         let changes = Changes {
             parent: None,
             paths: vec![
