@@ -331,6 +331,7 @@ pub(crate) fn draw(
             } else {
                 spans.push(Span::raw("↑↓/jk move · h/l pan · Enter diff"));
             }
+            spans.push(Span::raw(" · c to hide"));
             frame.render_widget(Paragraph::new(Line::from(spans)), status);
         }
         if !app.changes_focused {
@@ -1744,8 +1745,8 @@ mod tests {
         assert!(rendered_line(&terminal, 14).contains("↑↓/jk move · h/l pan"));
 
         assert!(
-            rendered_line(&terminal, 14).contains("Enter diff"),
-            "the normal hint returns on the next frame"
+            rendered_line(&terminal, 14).contains("Enter diff · c to hide"),
+            "the visible changes pane advertises how to hide it"
         );
 
         app.update(Action::Last);
@@ -1808,7 +1809,7 @@ mod tests {
         );
         assert!(
             rendered_line(&terminal, 14)
-                .contains("vs parent 1/2 0202020 · p next parent · ↑↓/jk move · h/l pan · Enter diff"),
+                .contains("vs parent 1/2 0202020 · p next parent · ↑↓/jk move · h/l pan · Enter diff · c to hide"),
             "merge diffs keep parent controls alongside navigation"
         );
         let parent = rendered_line(&terminal, 1);
