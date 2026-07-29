@@ -358,6 +358,12 @@ pub(crate) fn draw(
         "{} commits{status} · ↑↓/jk move · h/l pan",
         app.rows.len()
     ))];
+    if app.show_changes && changes.is_some_and(Changes::is_visible) {
+        footer_spans.push(match app.focus_feedback.take() {
+            Some(destination) => Span::raw(format!(" · Tab → {destination}")),
+            None => Span::raw(" · Tab switch"),
+        });
+    }
     footer_spans.extend([Span::raw(" · "), toggle("[ align", app.align_metadata)]);
     footer_spans.extend([Span::raw(" · "), toggle("o commit", app.show_commit)]);
     footer_spans.extend([Span::raw(" · "), toggle("c changes", app.show_changes)]);
@@ -1679,6 +1685,7 @@ mod tests {
             terminal.backend().buffer()[(2, 14)].modifier.contains(Modifier::DIM),
             "the inactive changes status is dimmed"
         );
+        assert!(rendered_line(&terminal, 15).contains("Tab switch"));
 
         app.update(Action::ToggleChangesFocus);
         app.update(Action::MoveDown);
@@ -1700,6 +1707,21 @@ mod tests {
             terminal.backend().buffer()[(5, 0)].modifier.contains(Modifier::DIM)
                 && !terminal.backend().buffer()[(2, 15)].modifier.contains(Modifier::DIM),
             "the inactive history is dimmed without dimming the main status"
+        );
+        assert!(rendered_line(&terminal, 15).contains("Tab → changes"));
+        terminal.draw(|frame| {
+            super::draw(
+                frame,
+                &mut app,
+                &Decorations::new(),
+                &gix::mailmap::Snapshot::default(),
+                None,
+                Some(&changes),
+            );
+        })?;
+        assert!(
+            rendered_line(&terminal, 15).contains("Tab switch"),
+            "focus feedback lasts for one redraw"
         );
         assert!(
             !terminal.backend().buffer()[(added_x, 8)]

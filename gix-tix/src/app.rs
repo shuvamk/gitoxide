@@ -270,6 +270,7 @@ pub(crate) struct App {
     junction_parent: Option<usize>,
     reachable_rows: Option<Vec<bool>>,
     pub copy_feedback: Option<CopyKind>,
+    pub(crate) focus_feedback: Option<&'static str>,
     pub estimated_lane_width: usize,
     pub horizontal_offset: usize,
     horizontal_page: usize,
@@ -322,6 +323,7 @@ impl App {
             junction_parent: None,
             reachable_rows: None,
             copy_feedback: None,
+            focus_feedback: None,
             estimated_lane_width: 0,
             horizontal_offset: 0,
             horizontal_page: 1,
@@ -514,6 +516,7 @@ impl App {
             Action::ToggleAlign => self.align_metadata = !self.align_metadata,
             Action::ToggleCommit => self.show_commit = !self.show_commit,
             Action::ToggleChanges => {
+                self.focus_feedback = None;
                 self.show_changes = !self.show_changes;
                 if !self.show_changes {
                     self.changes_focused = false;
@@ -525,6 +528,7 @@ impl App {
                 if self.changes_focused {
                     self.clear_preview_author_copy();
                 }
+                self.focus_feedback = Some(if self.changes_focused { "changes" } else { "history" });
             }
             Action::CycleChangesParent => {
                 if self.show_changes {
@@ -677,6 +681,7 @@ impl App {
         self.reset_changes_view();
         self.follow_tail = false;
         self.clear_preview_author_copy();
+        self.focus_feedback = None;
         self.signature_failures = 0;
         self.signature_verification_running = false;
     }
@@ -1594,6 +1599,12 @@ mod tests {
         let mut app = App::new(2);
         app.extend_commits((1..=3).map(row).collect::<Vec<_>>());
         app.set_changes_bounds(4, 10, 20, 45);
+        app.update(Action::ToggleChangesFocus);
+        assert!(app.changes_focused);
+        assert_eq!(app.focus_feedback.take(), Some("changes"));
+        app.update(Action::ToggleChangesFocus);
+        assert!(!app.changes_focused);
+        assert_eq!(app.focus_feedback.take(), Some("history"));
         app.update(Action::ToggleChangesFocus);
 
         app.update(Action::MoveDown);
