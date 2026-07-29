@@ -43,6 +43,7 @@ use ratatui::{TerminalOptions, Viewport, backend::CrosstermBackend, text::Line};
 const EVENT_BATCH_SIZE: usize = 256;
 const OBJECT_CACHE_SIZE: usize = 4 * 1024 * 1024;
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+const IMMEDIATE_PAGER_EXIT: Duration = Duration::from_millis(250);
 
 struct FillRepository<'a> {
     path: &'a Path,
@@ -555,12 +556,20 @@ fn event_loop(
                         .context("selected path no longer has diff resources")
                         .and_then(|(change, path)| prepare_file_diff(&repository_path, change, path))
                         .and_then(|diff| match diff {
-                            FileDiff::External(command) => run_external_diff(terminal, command, enhanced_keyboard),
-                            FileDiff::Pager { command, diff } => run_pager(terminal, command, &diff, enhanced_keyboard),
-                            FileDiff::BuiltIn(diff) => show_builtin_diff(terminal, &diff),
+                            FileDiff::External(command) => {
+                                run_external_diff(terminal, command, enhanced_keyboard).map(|()| None)
+                            }
+                            FileDiff::Pager { command, diff } => {
+                                run_pager(terminal, command, &diff, enhanced_keyboard).map(Some)
+                            }
+                            FileDiff::BuiltIn(diff) => show_builtin_diff(terminal, &diff).map(|()| None),
                         });
-                    if let Err(err) = result {
-                        app.diff_error = Some(format!("{err:#}"));
+                    match result {
+                        Ok(Some(elapsed)) if pager_closed_immediately(elapsed) => {
+                            app.diff_info = Some("pager closed immediately");
+                        }
+                        Err(err) => app.diff_error = Some(format!("{err:#}")),
+                        _ => {}
                     }
                 }
                 Effect::VerifySignatures(ids) => {
@@ -950,8 +959,9 @@ fn run_pager(
     mut command: Command,
     diff: &BuiltInDiff,
     enhanced_keyboard: bool,
-) -> Result<()> {
+) -> Result<Duration> {
     with_suspended_terminal(terminal, enhanced_keyboard, || {
+        let start = Instant::now();
         let mut child = command.spawn().context("could not launch diff pager")?;
         let write_result = child.stdin.take().map_or_else(
             || Err(io::Error::other("pager stdin was not piped")),
@@ -959,15 +969,16 @@ fn run_pager(
         );
         let status = child.wait().context("could not wait for diff pager");
         pager_write_result(write_result)?;
-        pager_status(status?)
+        pager_status(status?)?;
+        Ok(start.elapsed())
     })
 }
 
-fn with_suspended_terminal(
+fn with_suspended_terminal<T>(
     terminal: &mut ratatui::DefaultTerminal,
     enhanced_keyboard: bool,
-    operation: impl FnOnce() -> Result<()>,
-) -> Result<()> {
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let suspend = disable_input(terminal.backend_mut(), enhanced_keyboard)
         .and_then(|()| terminal.show_cursor())
         .and_then(|()| terminal::disable_raw_mode())
@@ -991,8 +1002,9 @@ fn with_suspended_terminal(
         .and_then(|()| enable_input(terminal.backend_mut(), enhanced_keyboard))
         .and_then(|()| terminal.hide_cursor())
         .and_then(|()| terminal.clear());
-    result?;
-    restore.context("could not restore terminal after external program")
+    let value = result?;
+    restore.context("could not restore terminal after external program")?;
+    Ok(value)
 }
 
 fn external_diff_status(status: ExitStatus) -> Result<()> {
@@ -1016,6 +1028,10 @@ fn pager_status(status: ExitStatus) -> Result<()> {
     } else {
         anyhow::bail!("diff pager exited with {status}")
     }
+}
+
+fn pager_closed_immediately(elapsed: Duration) -> bool {
+    elapsed <= IMMEDIATE_PAGER_EXIT
 }
 
 fn show_builtin_diff(terminal: &mut ratatui::DefaultTerminal, diff: &BuiltInDiff) -> Result<()> {
@@ -1439,6 +1455,9 @@ mod tests {
             pager_status(std::os::unix::process::ExitStatusExt::from_raw(1 << 8)).is_err(),
             "a failing pager remains visible"
         );
+        assert!(pager_closed_immediately(Duration::ZERO));
+        assert!(pager_closed_immediately(Duration::from_millis(250)));
+        assert!(!pager_closed_immediately(Duration::from_millis(251)));
         Ok(())
     }
 

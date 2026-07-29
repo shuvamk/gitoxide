@@ -259,6 +259,7 @@ pub(crate) struct App {
     pub(crate) changes_horizontal_offset: usize,
     pub(crate) changes_parent: usize,
     pub(crate) diff_error: Option<String>,
+    pub(crate) diff_info: Option<&'static str>,
     changes_page: usize,
     changes_max: usize,
     changes_horizontal_page: usize,
@@ -311,6 +312,7 @@ impl App {
             changes_horizontal_offset: 0,
             changes_parent: 0,
             diff_error: None,
+            diff_info: None,
             changes_page: 1,
             changes_max: 0,
             changes_horizontal_page: 1,
@@ -529,6 +531,7 @@ impl App {
             }
             Action::OpenDiff if self.changes_focused => {
                 self.diff_error = None;
+                self.diff_info = None;
                 return vec![Effect::OpenDiff(self.changes_selected)];
             }
             Action::VerifySignatures if !self.signature_verification_running => {
