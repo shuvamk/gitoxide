@@ -302,14 +302,7 @@ pub(crate) fn draw(
     app.set_horizontal_bounds(content.width as usize, max_offset);
     if let Some((outer, area)) = changes_pane {
         frame.render_widget(Clear, outer);
-        frame.render_widget(
-            Block::new().borders(Borders::TOP).border_style(if app.changes_focused {
-                Style::default()
-            } else {
-                Style::default().add_modifier(Modifier::DIM)
-            }),
-            outer,
-        );
+        frame.render_widget(Block::new().borders(Borders::TOP), outer);
         if let Some(changes) = changes.filter(|changes| changes.is_visible()) {
             render_changes(frame, area, changes, app);
             let status = Rect::new(
@@ -339,6 +332,11 @@ pub(crate) fn draw(
                 spans.push(Span::raw("↑↓/jk move · h/l pan · Enter diff"));
             }
             frame.render_widget(Paragraph::new(Line::from(spans)), status);
+        }
+        if !app.changes_focused {
+            frame
+                .buffer_mut()
+                .set_style(outer, Style::default().add_modifier(Modifier::DIM));
         }
     }
     if let Some((outer, area)) = commit_pane {
@@ -496,11 +494,7 @@ fn render_changes(frame: &mut Frame<'_>, area: Rect, changes: &Changes, app: &mu
                     Span::styled(format!("-{removals}"), color(Color::Red)),
                 ]);
             }
-            Line::from(spans).style(if app.changes_focused {
-                Style::default()
-            } else {
-                Style::default().add_modifier(Modifier::DIM)
-            })
+            Line::from(spans)
         })
         .collect();
     let horizontal_max = lines
@@ -1638,6 +1632,12 @@ mod tests {
         assert_eq!(terminal.backend().buffer()[(added_x, 8)].fg, Color::Green);
         assert_eq!(terminal.backend().buffer()[(deleted_x, 8)].fg, Color::Red);
         assert!(
+            terminal.backend().buffer()[(added_x, 8)]
+                .modifier
+                .contains(Modifier::DIM),
+            "the inactive summary is dimmed without losing its colors"
+        );
+        assert!(
             rendered_line(&terminal, 9).contains("A added"),
             "changed paths follow the summary in diff order"
         );
@@ -1664,6 +1664,10 @@ mod tests {
             rendered_line(&terminal, 14).contains("↑↓/jk move · h/l pan"),
             "the changes status advertises its navigation keys"
         );
+        assert!(
+            terminal.backend().buffer()[(2, 14)].modifier.contains(Modifier::DIM),
+            "the inactive changes status is dimmed"
+        );
 
         app.update(Action::ToggleChangesFocus);
         app.update(Action::MoveDown);
@@ -1680,6 +1684,13 @@ mod tests {
         assert!(
             !terminal.backend().buffer()[(20, 7)].modifier.contains(Modifier::DIM),
             "the focused changes border uses its normal style"
+        );
+        assert!(
+            !terminal.backend().buffer()[(added_x, 8)]
+                .modifier
+                .contains(Modifier::DIM)
+                && !terminal.backend().buffer()[(2, 14)].modifier.contains(Modifier::DIM),
+            "the focused summary and status use their normal intensity"
         );
         let selected = rendered_line(&terminal, 10);
         assert!(selected.contains("M modified +5 -2"));
