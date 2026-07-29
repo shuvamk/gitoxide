@@ -8,8 +8,9 @@ mod ui;
 
 use std::{
     ffi::OsString,
+    io::{self, Write},
     path::{Path, PathBuf},
-    process::ExitStatus,
+    process::{Command, ExitStatus, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -51,6 +52,7 @@ struct FillRepository<'a> {
 
 enum FileDiff {
     External(gix::diff::blob::platform::prepare_diff_command::Command),
+    Pager { command: Command, diff: BuiltInDiff },
     BuiltIn(BuiltInDiff),
 }
 
@@ -72,6 +74,14 @@ impl BuiltInDiff {
             lines,
             max_width,
         }
+    }
+
+    fn write_to(&self, mut out: impl Write) -> io::Result<()> {
+        for line in &self.lines {
+            out.write_all(line)?;
+            out.write_all(b"\n")?;
+        }
+        Ok(())
     }
 }
 
@@ -546,6 +556,7 @@ fn event_loop(
                         .and_then(|(change, path)| prepare_file_diff(&repository_path, change, path))
                         .and_then(|diff| match diff {
                             FileDiff::External(command) => run_external_diff(terminal, command, enhanced_keyboard),
+                            FileDiff::Pager { command, diff } => run_pager(terminal, command, &diff, enhanced_keyboard),
                             FileDiff::BuiltIn(diff) => show_builtin_diff(terminal, &diff),
                         });
                     if let Err(err) = result {
@@ -813,12 +824,34 @@ fn prepare_file_diff_with_repository(
             )
             .consume()
             .context("could not render selected diff")?;
-            Ok(FileDiff::BuiltIn(built_in_diff(path, change, Some(rendered), false)))
+            prepare_pager(repository, built_in_diff(path, change, Some(rendered), false))
         }
         gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary => {
-            Ok(FileDiff::BuiltIn(built_in_diff(path, change, None, true)))
+            prepare_pager(repository, built_in_diff(path, change, None, true))
         }
     }
+}
+
+fn prepare_pager(repository: &gix::Repository, diff: BuiltInDiff) -> Result<FileDiff> {
+    let Some(program) = repository.config_snapshot().trusted_program("core.pager") else {
+        return Ok(FileDiff::BuiltIn(diff));
+    };
+    if program.is_empty() || program == "cat" {
+        return Ok(FileDiff::BuiltIn(diff));
+    }
+    let command = gix::command::prepare(program)
+        .command_may_be_shell_script_disallow_manual_argument_splitting()
+        .with_context(
+            repository
+                .command_context()
+                .context("could not prepare pager environment")?,
+        )
+        .env("GIT_PAGER_IN_USE", "true")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .into();
+    Ok(FileDiff::Pager { command, diff })
 }
 
 fn prepare_external_diff(
@@ -906,6 +939,35 @@ fn run_external_diff(
     mut command: gix::diff::blob::platform::prepare_diff_command::Command,
     enhanced_keyboard: bool,
 ) -> Result<()> {
+    with_suspended_terminal(terminal, enhanced_keyboard, || {
+        let status = command.status().context("could not launch external diff")?;
+        external_diff_status(status)
+    })
+}
+
+fn run_pager(
+    terminal: &mut ratatui::DefaultTerminal,
+    mut command: Command,
+    diff: &BuiltInDiff,
+    enhanced_keyboard: bool,
+) -> Result<()> {
+    with_suspended_terminal(terminal, enhanced_keyboard, || {
+        let mut child = command.spawn().context("could not launch diff pager")?;
+        let write_result = child.stdin.take().map_or_else(
+            || Err(io::Error::other("pager stdin was not piped")),
+            |mut stdin| diff.write_to(&mut stdin),
+        );
+        let status = child.wait().context("could not wait for diff pager");
+        pager_write_result(write_result)?;
+        pager_status(status?)
+    })
+}
+
+fn with_suspended_terminal(
+    terminal: &mut ratatui::DefaultTerminal,
+    enhanced_keyboard: bool,
+    operation: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     let suspend = disable_input(terminal.backend_mut(), enhanced_keyboard)
         .and_then(|()| terminal.show_cursor())
         .and_then(|()| terminal::disable_raw_mode())
@@ -921,17 +983,16 @@ fn run_external_diff(
         let _ = terminal::enable_raw_mode();
         let _ = enable_input(terminal.backend_mut(), enhanced_keyboard);
         let _ = terminal.hide_cursor();
-        return Err(err).context("could not suspend terminal for external diff");
+        return Err(err).context("could not suspend terminal for external program");
     }
 
-    let status = command.status().context("could not launch external diff");
+    let result = operation();
     let restore = terminal::enable_raw_mode()
         .and_then(|()| enable_input(terminal.backend_mut(), enhanced_keyboard))
         .and_then(|()| terminal.hide_cursor())
         .and_then(|()| terminal.clear());
-    let status = status?;
-    restore.context("could not restore terminal after external diff")?;
-    external_diff_status(status)
+    result?;
+    restore.context("could not restore terminal after external program")
 }
 
 fn external_diff_status(status: ExitStatus) -> Result<()> {
@@ -939,6 +1000,21 @@ fn external_diff_status(status: ExitStatus) -> Result<()> {
         Ok(())
     } else {
         anyhow::bail!("external diff exited with {status}")
+    }
+}
+
+fn pager_write_result(result: io::Result<()>) -> Result<()> {
+    match result {
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => result.context("could not write diff to pager"),
+    }
+}
+
+fn pager_status(status: ExitStatus) -> Result<()> {
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("diff pager exited with {status}")
     }
 }
 
@@ -1229,6 +1305,7 @@ mod tests {
                 assert!(diff.lines.iter().any(|line| line == "+root"));
             }
             FileDiff::External(_) => unreachable!("isolated repositories have no external diff"),
+            FileDiff::Pager { .. } => unreachable!("isolated repositories have no pager"),
         }
 
         let external_repository = gix::open_opts(
@@ -1243,6 +1320,40 @@ mod tests {
                 "the configured helper is prepared with shell semantics"
             ),
             FileDiff::BuiltIn(_) => unreachable!("configured external diffs take precedence"),
+            FileDiff::Pager { .. } => unreachable!("configured external diffs take precedence"),
+        }
+
+        let pager_repository = gix::open_opts(
+            &fixture,
+            gix::open::Options::isolated().config_overrides(["core.pager=delta --dark"]),
+        )?;
+        match prepare_file_diff_with_repository(&pager_repository, &root.diffs[0], &root.paths[0])? {
+            FileDiff::Pager { command, diff } => {
+                assert!(
+                    command
+                        .get_args()
+                        .any(|arg| arg.to_string_lossy().contains("delta --dark")),
+                    "the configured pager is prepared with shell semantics"
+                );
+                let mut patch = Vec::new();
+                diff.write_to(&mut patch)?;
+                assert!(patch.starts_with(b"--- /dev/null\n+++ b/root\n"));
+                assert!(patch.ends_with(b"\n"), "pagers receive a complete final line");
+            }
+            FileDiff::BuiltIn(_) | FileDiff::External(_) => {
+                unreachable!("configured pagers receive built-in diffs")
+            }
+        }
+
+        for setting in ["core.pager=", "core.pager=cat"] {
+            let repository = gix::open_opts(&fixture, gix::open::Options::isolated().config_overrides([setting]))?;
+            assert!(
+                matches!(
+                    prepare_file_diff_with_repository(&repository, &root.diffs[0], &root.paths[0])?,
+                    FileDiff::BuiltIn(_)
+                ),
+                "disabled pagers retain the built-in viewer"
+            );
         }
 
         let topic = load_changes(&repository, repository.rev_parse_single("topic")?.detach(), 0)?;
@@ -1302,6 +1413,31 @@ mod tests {
             load_changes(&repository, merge, 2)?.parent,
             first_parent.parent,
             "parent selection wraps around"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn streams_diff_bytes_and_accepts_early_pager_exit() -> gix_testtools::Result {
+        let diff = BuiltInDiff::new(
+            "M file".into(),
+            vec![BString::from("--- a/file"), BString::from(vec![b'+', 0xff])],
+        );
+        let mut patch = Vec::new();
+
+        diff.write_to(&mut patch)?;
+
+        assert_eq!(patch, b"--- a/file\n+\xff\n", "patch bytes reach the pager unchanged");
+        pager_write_result(Err(io::Error::new(io::ErrorKind::BrokenPipe, "pager quit")))
+            .expect("an early pager exit is normal");
+        assert!(
+            pager_write_result(Err(io::Error::other("write failed"))).is_err(),
+            "other write failures remain visible"
+        );
+        #[cfg(unix)]
+        assert!(
+            pager_status(std::os::unix::process::ExitStatusExt::from_raw(1 << 8)).is_err(),
+            "a failing pager remains visible"
         );
         Ok(())
     }
