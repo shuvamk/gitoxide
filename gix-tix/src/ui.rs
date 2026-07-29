@@ -8,11 +8,51 @@ use ratatui::{
 };
 
 use crate::{
+    BuiltInDiff,
     app::{App, AttributionKind, ChangeKind, Changes, CommitRow, CopyKind, NameMode, RefMode, SignatureState, State},
     history::{DecorationKind, Decorations},
 };
 
 const COMPARED_PARENT_COLOR: Color = Color::Cyan;
+
+pub(crate) fn draw_file_diff(frame: &mut Frame<'_>, diff: &BuiltInDiff, offset: usize, horizontal_offset: usize) {
+    let [header, body, footer] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    frame.render_widget(Clear, frame.area());
+    frame.render_widget(
+        Paragraph::new(diff.title.to_str_lossy()).style(Style::default().add_modifier(Modifier::BOLD)),
+        header,
+    );
+    let lines = diff
+        .lines
+        .iter()
+        .map(|line| {
+            let style = if line.starts_with(b"@@") {
+                Style::default().fg(Color::Cyan)
+            } else if line.starts_with(b"+") {
+                Style::default().fg(Color::Green)
+            } else if line.starts_with(b"-") {
+                Style::default().fg(Color::Red)
+            } else if line.starts_with(b"Binary ") {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            Line::styled(line.to_str_lossy(), style)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).scroll((
+            u16::try_from(offset).unwrap_or(u16::MAX),
+            u16::try_from(horizontal_offset).unwrap_or(u16::MAX),
+        )),
+        body,
+    );
+    frame.render_widget(
+        Paragraph::new("↑↓/jk move · h/l pan · Enter/q/Esc back").style(Style::default().add_modifier(Modifier::DIM)),
+        footer,
+    );
+}
 
 pub(crate) fn draw(
     frame: &mut Frame<'_>,
@@ -293,7 +333,11 @@ pub(crate) fn draw(
                     Span::raw(" · p next parent · "),
                 ]);
             }
-            spans.push(Span::raw("↑↓/jk move · h/l pan"));
+            if let Some(error) = &app.diff_error {
+                spans.push(Span::styled(format!("diff: {error}"), color(Color::Red)));
+            } else {
+                spans.push(Span::raw("↑↓/jk move · h/l pan · Enter diff"));
+            }
             frame.render_widget(Paragraph::new(Line::from(spans)), status);
         }
     }
@@ -855,6 +899,33 @@ mod tests {
             .expect("a loading app starts lane computation");
         let (rows, lanes, lane_time) = crate::app::compute_lanes(rows);
         app.finish_lane_computation(rows, lanes, lane_time);
+    }
+
+    #[test]
+    fn renders_a_colored_file_diff_pager() -> Result<(), Box<dyn std::error::Error>> {
+        let diff = BuiltInDiff::new(
+            "M file".into(),
+            ["--- a/file", "+++ b/file", "@@ -1 +1 @@", "-old", "+new"]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(40, 7))?;
+
+        terminal.draw(|frame| draw_file_diff(frame, &diff, 0, 0))?;
+
+        assert_eq!(rendered_line(&terminal, 0).trim(), "M file");
+        for (y, color) in [
+            (1, Color::Red),
+            (2, Color::Green),
+            (3, Color::Cyan),
+            (4, Color::Red),
+            (5, Color::Green),
+        ] {
+            assert_eq!(terminal.backend().buffer()[(0, y)].fg, color);
+        }
+        assert!(rendered_line(&terminal, 6).contains("Enter/q/Esc back"));
+        Ok(())
     }
 
     #[test]
@@ -1527,6 +1598,7 @@ mod tests {
                     lines: Some((24, 5)),
                 },
             ],
+            diffs: Vec::new(),
             lines_added: 42,
             lines_removed: 17,
         };
@@ -1679,7 +1751,8 @@ mod tests {
             "parent context no longer crowds the aggregate summary"
         );
         assert!(
-            rendered_line(&terminal, 14).contains("vs parent 1/2 0202020 · p next parent · ↑↓/jk move · h/l pan"),
+            rendered_line(&terminal, 14)
+                .contains("vs parent 1/2 0202020 · p next parent · ↑↓/jk move · h/l pan · Enter diff"),
             "merge diffs keep parent controls alongside navigation"
         );
         let parent = rendered_line(&terminal, 1);

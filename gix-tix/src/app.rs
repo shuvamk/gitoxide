@@ -72,10 +72,11 @@ pub(crate) struct PathChange {
     pub lines: Option<(u32, u32)>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Changes {
     pub parent: Option<ComparedParent>,
     pub paths: Vec<PathChange>,
+    pub diffs: Vec<gix::object::tree::diff::ChangeDetached>,
     pub lines_added: u64,
     pub lines_removed: u64,
 }
@@ -208,6 +209,7 @@ pub(crate) enum Action {
     ToggleChanges,
     ToggleChangesFocus,
     CycleChangesParent,
+    OpenDiff,
     VerifySignatures,
     Cancel,
     Copy,
@@ -222,6 +224,7 @@ pub(crate) enum Effect {
     CopyId(ObjectId),
     CopyAuthor(&'static Author),
     Reload(bool),
+    OpenDiff(usize),
     VerifySignatures(Vec<ObjectId>),
     Quit,
 }
@@ -255,6 +258,7 @@ pub(crate) struct App {
     pub(crate) changes_offset: usize,
     pub(crate) changes_horizontal_offset: usize,
     pub(crate) changes_parent: usize,
+    pub(crate) diff_error: Option<String>,
     changes_page: usize,
     changes_max: usize,
     changes_horizontal_page: usize,
@@ -306,6 +310,7 @@ impl App {
             changes_offset: 0,
             changes_horizontal_offset: 0,
             changes_parent: 0,
+            diff_error: None,
             changes_page: 1,
             changes_max: 0,
             changes_horizontal_page: 1,
@@ -459,11 +464,13 @@ impl App {
             Action::PageDown => self.move_selection(self.viewport_rows.max(1), true),
             Action::First if self.changes_focused => {
                 self.changes_selected = 0;
+                self.diff_error = None;
                 self.ensure_changes_visible();
             }
             Action::First => self.select(0),
             Action::Last if self.changes_focused => {
                 self.changes_selected = self.changes_max;
+                self.diff_error = None;
                 self.ensure_changes_visible();
             }
             Action::Last if !self.rows.is_empty() => {
@@ -517,7 +524,12 @@ impl App {
             Action::CycleChangesParent => {
                 if self.show_changes {
                     self.changes_parent = self.changes_parent.saturating_add(1);
+                    self.diff_error = None;
                 }
+            }
+            Action::OpenDiff if self.changes_focused => {
+                self.diff_error = None;
+                return vec![Effect::OpenDiff(self.changes_selected)];
             }
             Action::VerifySignatures if !self.signature_verification_running => {
                 let start = self.offset.min(self.rows.len());
@@ -686,6 +698,7 @@ impl App {
     }
 
     fn move_changes(&mut self, distance: usize, down: bool) {
+        self.diff_error = None;
         self.changes_selected = if down {
             self.changes_selected.saturating_add(distance).min(self.changes_max)
         } else {
@@ -887,6 +900,7 @@ impl App {
     }
 
     pub(crate) fn reset_changes_view(&mut self) {
+        self.diff_error = None;
         self.changes_selected = 0;
         self.changes_offset = 0;
         self.changes_horizontal_offset = 0;
@@ -1554,6 +1568,7 @@ mod tests {
 
         app.update(Action::MoveDown);
         assert_eq!((app.changes_selected, app.changes_offset), (1, 0));
+        assert_eq!(app.update(Action::OpenDiff), vec![Effect::OpenDiff(1)]);
         assert_eq!(
             app.selected,
             Some(0),
@@ -1578,6 +1593,7 @@ mod tests {
 
         app.update(Action::ToggleChanges);
         assert!(!app.changes_focused, "closing the panel returns focus to history");
+        assert!(app.update(Action::OpenDiff).is_empty());
         assert_eq!(app.changes_selected, 0);
         assert_eq!(app.changes_offset, 0);
         assert_eq!(app.changes_horizontal_offset, 0);

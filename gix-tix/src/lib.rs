@@ -9,6 +9,7 @@ mod ui;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    process::ExitStatus,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -28,7 +29,7 @@ use crossterm::{
         PushKeyboardEnhancementFlags,
     },
     execute,
-    style::Print,
+    style::{Print, ResetColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use gix::{
@@ -36,7 +37,7 @@ use gix::{
     prelude::TreeDiffChangeExt,
 };
 use history::{Authors, Decorations, Event, SharedAuthors};
-use ratatui::{TerminalOptions, Viewport, backend::CrosstermBackend};
+use ratatui::{TerminalOptions, Viewport, backend::CrosstermBackend, text::Line};
 
 const EVENT_BATCH_SIZE: usize = 256;
 const OBJECT_CACHE_SIZE: usize = 4 * 1024 * 1024;
@@ -46,6 +47,32 @@ struct FillRepository<'a> {
     path: &'a Path,
     retained: Option<gix::Repository>,
     retain: bool,
+}
+
+enum FileDiff {
+    External(gix::diff::blob::platform::prepare_diff_command::Command),
+    BuiltIn(BuiltInDiff),
+}
+
+pub(crate) struct BuiltInDiff {
+    title: BString,
+    lines: Vec<BString>,
+    max_width: usize,
+}
+
+impl BuiltInDiff {
+    fn new(title: BString, lines: Vec<BString>) -> Self {
+        let max_width = lines
+            .iter()
+            .map(|line| Line::from(line.to_str_lossy()).width())
+            .max()
+            .unwrap_or_default();
+        BuiltInDiff {
+            title,
+            lines,
+            max_width,
+        }
+    }
 }
 
 /// Options for [`run()`].
@@ -511,6 +538,20 @@ fn event_loop(
                         gix::features::threading::OwnShared::clone(&authors),
                     );
                 }
+                Effect::OpenDiff(index) => {
+                    let result = changes
+                        .as_ref()
+                        .and_then(|(_, _, changes)| changes.diffs.get(index).zip(changes.paths.get(index)))
+                        .context("selected path no longer has diff resources")
+                        .and_then(|(change, path)| prepare_file_diff(&repository_path, change, path))
+                        .and_then(|diff| match diff {
+                            FileDiff::External(command) => run_external_diff(terminal, command, enhanced_keyboard),
+                            FileDiff::BuiltIn(diff) => show_builtin_diff(terminal, &diff),
+                        });
+                    if let Err(err) = result {
+                        app.diff_error = Some(format!("{err:#}"));
+                    }
+                }
                 Effect::VerifySignatures(ids) => {
                     verification_receiver = Some(start_signature_verification(repository_path.clone(), ids));
                 }
@@ -720,6 +761,235 @@ fn open_fill_repository(repository_path: &Path) -> Result<gix::Repository> {
     Ok(repository)
 }
 
+fn prepare_file_diff(
+    repository_path: &Path,
+    change: &gix::object::tree::diff::ChangeDetached,
+    path: &PathChange,
+) -> Result<FileDiff> {
+    let mut repository = gix::open(repository_path).context("could not open repository for file diff")?;
+    repository.object_cache_size(OBJECT_CACHE_SIZE);
+    prepare_file_diff_with_repository(&repository, change, path)
+}
+
+fn prepare_file_diff_with_repository(
+    repository: &gix::Repository,
+    change: &gix::object::tree::diff::ChangeDetached,
+    path: &PathChange,
+) -> Result<FileDiff> {
+    let global_command = repository
+        .config_snapshot()
+        .trusted_program(gix::config::tree::Diff::EXTERNAL)
+        .map(gix::path::os_string_into_bstring)
+        .transpose()
+        .context("external diff command is not representable on this platform")?;
+    let mut resources = repository
+        .diff_resource_cache(
+            gix::diff::blob::pipeline::Mode::ToGitUnlessBinaryToTextIsPresent,
+            Default::default(),
+        )
+        .context("could not initialize file diff")?;
+    resources.options.skip_internal_diff_if_external_is_configured = true;
+    change
+        .attach(repository, repository)
+        .diff(&mut resources)
+        .context("could not prepare selected file")?;
+    let prepared = resources.prepare_diff().context("could not prepare selected diff")?;
+    match prepared.operation {
+        gix::diff::blob::platform::prepare_diff::Operation::ExternalCommand { command } => {
+            let command = command.to_owned();
+            prepare_external_diff(repository, &resources, command)
+        }
+        gix::diff::blob::platform::prepare_diff::Operation::InternalDiff { algorithm } => {
+            if let Some(command) = global_command {
+                return prepare_external_diff(repository, &resources, command);
+            }
+            let input = prepared.interned_input();
+            let diff = gix::diff::blob::diff_with_slider_heuristics(algorithm, &input);
+            let rendered = gix::diff::blob::UnifiedDiff::new(
+                &diff,
+                &input,
+                gix::diff::blob::unified_diff::ConsumeBinaryHunk::new(BString::default(), "\n"),
+                gix::diff::blob::unified_diff::ContextSize::symmetrical(3),
+            )
+            .consume()
+            .context("could not render selected diff")?;
+            Ok(FileDiff::BuiltIn(built_in_diff(path, change, Some(rendered), false)))
+        }
+        gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary => {
+            Ok(FileDiff::BuiltIn(built_in_diff(path, change, None, true)))
+        }
+    }
+}
+
+fn prepare_external_diff(
+    repository: &gix::Repository,
+    resources: &gix::diff::blob::Platform,
+    command: BString,
+) -> Result<FileDiff> {
+    Ok(FileDiff::External(
+        resources
+            .prepare_diff_command(
+                command,
+                repository
+                    .command_context()
+                    .context("could not prepare external diff environment")?,
+                0,
+                1,
+            )
+            .context("could not prepare external diff command")?,
+    ))
+}
+
+fn built_in_diff(
+    path: &PathChange,
+    change: &gix::object::tree::diff::ChangeDetached,
+    rendered: Option<BString>,
+    binary: bool,
+) -> BuiltInDiff {
+    use gix::object::tree::diff::ChangeDetached;
+
+    let (old_path, new_path, old_mode, new_mode) = match change {
+        ChangeDetached::Addition { entry_mode, .. } => (None, Some(path.path.as_bstr()), None, Some(*entry_mode)),
+        ChangeDetached::Deletion { entry_mode, .. } => (Some(path.path.as_bstr()), None, Some(*entry_mode), None),
+        ChangeDetached::Modification {
+            previous_entry_mode,
+            entry_mode,
+            ..
+        } => (
+            Some(path.path.as_bstr()),
+            Some(path.path.as_bstr()),
+            Some(*previous_entry_mode),
+            Some(*entry_mode),
+        ),
+        ChangeDetached::Rewrite {
+            source_entry_mode,
+            entry_mode,
+            ..
+        } => (
+            path.source.as_ref().map(|path| path.as_bstr()),
+            Some(path.path.as_bstr()),
+            Some(*source_entry_mode),
+            Some(*entry_mode),
+        ),
+    };
+    let display_path = |path: Option<&gix::bstr::BStr>, prefix: &str| -> BString {
+        path.map_or_else(
+            || "/dev/null".into(),
+            |path| format!("{prefix}{}", path.to_str_lossy()).into(),
+        )
+    };
+    let mut lines = vec![
+        format!("--- {}", display_path(old_path, "a/").to_str_lossy()).into(),
+        format!("+++ {}", display_path(new_path, "b/").to_str_lossy()).into(),
+    ];
+    if old_mode != new_mode {
+        if let Some(mode) = old_mode {
+            lines.push(format!("old mode {}", mode.kind().as_octal_str()).into());
+        }
+        if let Some(mode) = new_mode {
+            lines.push(format!("new mode {}", mode.kind().as_octal_str()).into());
+        }
+    }
+    if binary {
+        lines.push("Binary files differ".into());
+    } else if let Some(rendered) = rendered {
+        lines.extend(rendered.lines().map(BString::from));
+    }
+    BuiltInDiff::new(
+        format!("{} {}", path.kind.letter(), path.path.to_str_lossy()).into(),
+        lines,
+    )
+}
+
+fn run_external_diff(
+    terminal: &mut ratatui::DefaultTerminal,
+    mut command: gix::diff::blob::platform::prepare_diff_command::Command,
+    enhanced_keyboard: bool,
+) -> Result<()> {
+    let suspend = disable_input(terminal.backend_mut(), enhanced_keyboard)
+        .and_then(|()| terminal.show_cursor())
+        .and_then(|()| terminal::disable_raw_mode())
+        .and_then(|()| {
+            execute!(
+                terminal.backend_mut(),
+                ResetColor,
+                cursor::MoveTo(0, 0),
+                Clear(ClearType::All)
+            )
+        });
+    if let Err(err) = suspend {
+        let _ = terminal::enable_raw_mode();
+        let _ = enable_input(terminal.backend_mut(), enhanced_keyboard);
+        let _ = terminal.hide_cursor();
+        return Err(err).context("could not suspend terminal for external diff");
+    }
+
+    let status = command.status().context("could not launch external diff");
+    let restore = terminal::enable_raw_mode()
+        .and_then(|()| enable_input(terminal.backend_mut(), enhanced_keyboard))
+        .and_then(|()| terminal.hide_cursor())
+        .and_then(|()| terminal.clear());
+    let status = status?;
+    restore.context("could not restore terminal after external diff")?;
+    external_diff_status(status)
+}
+
+fn external_diff_status(status: ExitStatus) -> Result<()> {
+    if status.success() || status.code() == Some(1) {
+        Ok(())
+    } else {
+        anyhow::bail!("external diff exited with {status}")
+    }
+}
+
+fn show_builtin_diff(terminal: &mut ratatui::DefaultTerminal, diff: &BuiltInDiff) -> Result<()> {
+    let mut offset = 0usize;
+    let mut horizontal_offset = 0usize;
+    let mut focused = true;
+    loop {
+        let size = terminal.size().context("could not determine diff viewport")?;
+        let page = usize::from(size.height.saturating_sub(2)).max(1);
+        let max = diff.lines.len().saturating_sub(page);
+        let horizontal_page = usize::from(size.width).max(1);
+        let horizontal_max = diff.max_width.saturating_sub(horizontal_page);
+        offset = offset.min(max);
+        horizontal_offset = horizontal_offset.min(horizontal_max);
+        terminal
+            .draw(|frame| ui::draw_file_diff(frame, diff, offset, horizontal_offset))
+            .context("could not draw file diff")?;
+        let event = event::read().context("could not read file diff input")?;
+        let key = match event {
+            TerminalEvent::FocusLost => {
+                focused = false;
+                continue;
+            }
+            TerminalEvent::FocusGained => {
+                focused = true;
+                continue;
+            }
+            TerminalEvent::Resize(_, _) => continue,
+            TerminalEvent::Key(key) if focused && key.kind != KeyEventKind::Release => key,
+            _ => continue,
+        };
+        match action(key) {
+            Some(Action::OpenDiff | Action::Quit | Action::Cancel) => return Ok(()),
+            Some(Action::MoveUp) => offset = offset.saturating_sub(1),
+            Some(Action::MoveDown) => offset = offset.saturating_add(1).min(max),
+            Some(Action::PageUp) => offset = offset.saturating_sub(page),
+            Some(Action::PageDown) => offset = offset.saturating_add(page).min(max),
+            Some(Action::HalfPageUp) => offset = offset.saturating_sub((page / 2).max(1)),
+            Some(Action::HalfPageDown) => offset = offset.saturating_add((page / 2).max(1)).min(max),
+            Some(Action::First) => offset = 0,
+            Some(Action::Last) => offset = max,
+            Some(Action::ScrollLeft) => horizontal_offset = horizontal_offset.saturating_sub(horizontal_page),
+            Some(Action::ScrollRight) => {
+                horizontal_offset = horizontal_offset.saturating_add(horizontal_page).min(horizontal_max);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn load_commit_message(repository: &gix::Repository, id: gix::ObjectId) -> Result<BString> {
     let commit = repository.find_commit(id).context("could not load commit message")?;
     Ok(commit.message_raw_sloppy().to_owned())
@@ -816,6 +1086,7 @@ fn load_changes(repository: &gix::Repository, id: gix::ObjectId, requested_paren
             path,
             lines,
         });
+        out.diffs.push(change);
     }
     Ok(out)
 }
@@ -859,6 +1130,7 @@ fn action(key: KeyEvent) -> Option<Action> {
             Some(Action::PreviewAuthorCopy(key.kind != KeyEventKind::Release))
         }
         KeyCode::Tab => Some(Action::ToggleChangesFocus),
+        KeyCode::Enter => Some(Action::OpenDiff),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
         KeyCode::Char('c') => Some(Action::ToggleChanges),
         KeyCode::Char('p') => Some(Action::CycleChangesParent),
@@ -936,24 +1208,42 @@ mod tests {
     #[test]
     fn loads_changes_against_each_merge_parent() -> gix_testtools::Result {
         let fixture = gix_testtools::scripted_fixture_read_only("history.sh")?;
-        let repository = gix::open(&fixture)?;
+        let repository = gix::open_opts(&fixture, gix::open::Options::isolated())?;
 
         let root = load_changes(&repository, repository.rev_parse_single("v1^{}")?.detach(), 0)?;
         assert_eq!(
-            root,
-            Changes {
-                parent: None,
-                paths: vec![PathChange {
-                    kind: ChangeKind::Added,
-                    source: None,
-                    path: "root".into(),
-                    lines: Some((1, 0)),
-                }],
-                lines_added: 1,
-                lines_removed: 0,
-            },
+            root.paths,
+            [PathChange {
+                kind: ChangeKind::Added,
+                source: None,
+                path: "root".into(),
+                lines: Some((1, 0)),
+            }],
             "root commits are compared to the empty tree"
         );
+        assert_eq!((root.parent, root.lines_added, root.lines_removed), (None, 1, 0));
+        assert_eq!(root.diffs.len(), 1, "the original change is retained for file diffs");
+        match prepare_file_diff_with_repository(&repository, &root.diffs[0], &root.paths[0])? {
+            FileDiff::BuiltIn(diff) => {
+                assert_eq!(diff.title, "A root");
+                assert!(diff.lines.iter().any(|line| line == "+root"));
+            }
+            FileDiff::External(_) => unreachable!("isolated repositories have no external diff"),
+        }
+
+        let external_repository = gix::open_opts(
+            &fixture,
+            gix::open::Options::isolated().config_overrides(["diff.external=test --flag"]),
+        )?;
+        match prepare_file_diff_with_repository(&external_repository, &root.diffs[0], &root.paths[0])? {
+            FileDiff::External(command) => assert!(
+                command
+                    .get_args()
+                    .any(|arg| arg.to_string_lossy().contains("test --flag")),
+                "the configured helper is prepared with shell semantics"
+            ),
+            FileDiff::BuiltIn(_) => unreachable!("configured external diffs take precedence"),
+        }
 
         let topic = load_changes(&repository, repository.rev_parse_single("topic")?.detach(), 0)?;
         assert_eq!(
@@ -1095,6 +1385,10 @@ mod tests {
         assert_eq!(
             action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Some(Action::ToggleChangesFocus)
+        );
+        assert_eq!(
+            action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(Action::OpenDiff)
         );
         assert_eq!(
             action(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
