@@ -556,20 +556,12 @@ fn event_loop(
                         .context("selected path no longer has diff resources")
                         .and_then(|(change, path)| prepare_file_diff(&repository_path, change, path))
                         .and_then(|diff| match diff {
-                            FileDiff::External(command) => {
-                                run_external_diff(terminal, command, enhanced_keyboard).map(|()| None)
-                            }
-                            FileDiff::Pager { command, diff } => {
-                                run_pager(terminal, command, &diff, enhanced_keyboard).map(Some)
-                            }
-                            FileDiff::BuiltIn(diff) => show_builtin_diff(terminal, &diff).map(|()| None),
+                            FileDiff::External(command) => run_external_diff(terminal, command, enhanced_keyboard),
+                            FileDiff::Pager { command, diff } => run_pager(terminal, command, &diff, enhanced_keyboard),
+                            FileDiff::BuiltIn(diff) => show_builtin_diff(terminal, &diff),
                         });
-                    match result {
-                        Ok(Some(elapsed)) if pager_closed_immediately(elapsed) => {
-                            app.diff_info = Some("pager closed immediately");
-                        }
-                        Err(err) => app.diff_error = Some(format!("{err:#}")),
-                        _ => {}
+                    if let Err(err) = result {
+                        app.diff_error = Some(format!("{err:#}"));
                     }
                 }
                 Effect::VerifySignatures(ids) => {
@@ -959,7 +951,7 @@ fn run_pager(
     mut command: Command,
     diff: &BuiltInDiff,
     enhanced_keyboard: bool,
-) -> Result<Duration> {
+) -> Result<()> {
     with_suspended_terminal(terminal, enhanced_keyboard, || {
         let start = Instant::now();
         let mut child = command.spawn().context("could not launch diff pager")?;
@@ -970,8 +962,26 @@ fn run_pager(
         let status = child.wait().context("could not wait for diff pager");
         pager_write_result(write_result)?;
         pager_status(status?)?;
-        Ok(start.elapsed())
+        if pager_needs_acknowledgement(start.elapsed()) {
+            wait_for_keypress()?;
+        }
+        Ok(())
     })
+}
+
+fn wait_for_keypress() -> Result<()> {
+    terminal::enable_raw_mode().context("could not read pager acknowledgement")?;
+    loop {
+        if matches!(
+            event::read().context("could not read pager acknowledgement")?,
+            TerminalEvent::Key(KeyEvent {
+                kind: KeyEventKind::Press,
+                ..
+            })
+        ) {
+            return Ok(());
+        }
+    }
 }
 
 fn with_suspended_terminal<T>(
@@ -1030,7 +1040,7 @@ fn pager_status(status: ExitStatus) -> Result<()> {
     }
 }
 
-fn pager_closed_immediately(elapsed: Duration) -> bool {
+fn pager_needs_acknowledgement(elapsed: Duration) -> bool {
     elapsed <= IMMEDIATE_PAGER_EXIT
 }
 
@@ -1455,9 +1465,18 @@ mod tests {
             pager_status(std::os::unix::process::ExitStatusExt::from_raw(1 << 8)).is_err(),
             "a failing pager remains visible"
         );
-        assert!(pager_closed_immediately(Duration::ZERO));
-        assert!(pager_closed_immediately(Duration::from_millis(250)));
-        assert!(!pager_closed_immediately(Duration::from_millis(251)));
+        assert!(
+            pager_needs_acknowledgement(Duration::ZERO),
+            "an immediately closing pager leaves its output visible"
+        );
+        assert!(
+            pager_needs_acknowledgement(Duration::from_millis(250)),
+            "the threshold is inclusive"
+        );
+        assert!(
+            !pager_needs_acknowledgement(Duration::from_millis(251)),
+            "longer-running pagers restore tix immediately"
+        );
         Ok(())
     }
 

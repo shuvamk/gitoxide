@@ -333,9 +333,7 @@ pub(crate) fn draw(
                     Span::raw(" · p next parent · "),
                 ]);
             }
-            if let Some(info) = app.diff_info.take() {
-                spans.push(Span::styled(info, color(Color::Yellow)));
-            } else if let Some(error) = &app.diff_error {
+            if let Some(error) = &app.diff_error {
                 spans.push(Span::styled(format!("diff: {error}"), color(Color::Red)));
             } else {
                 spans.push(Span::raw("↑↓/jk move · h/l pan · Enter diff"));
@@ -1719,33 +1717,6 @@ mod tests {
         assert!(rendered_line(&terminal, 13).contains("… 2 lines not shown"));
         assert!(rendered_line(&terminal, 14).contains("↑↓/jk move · h/l pan"));
 
-        app.diff_info = Some("pager closed immediately");
-        terminal.draw(|frame| {
-            super::draw(
-                frame,
-                &mut app,
-                &Decorations::new(),
-                &gix::mailmap::Snapshot::default(),
-                None,
-                Some(&changes),
-            );
-        })?;
-        let status = rendered_line(&terminal, 14);
-        let info_x = status
-            .find("pager closed immediately")
-            .expect("pager feedback is visible") as u16;
-        assert_eq!(terminal.backend().buffer()[(info_x, 14)].fg, Color::Yellow);
-
-        terminal.draw(|frame| {
-            super::draw(
-                frame,
-                &mut app,
-                &Decorations::new(),
-                &gix::mailmap::Snapshot::default(),
-                None,
-                Some(&changes),
-            );
-        })?;
         assert!(
             rendered_line(&terminal, 14).contains("Enter diff"),
             "the normal hint returns on the next frame"
