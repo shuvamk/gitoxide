@@ -233,6 +233,7 @@ pub(crate) enum Effect {
 pub(crate) struct App {
     pub rows: Vec<CommitRow>,
     titles: Vec<u8>,
+    notes: HashMap<ObjectId, Vec<BString>>,
     graph: Option<Graph>,
     attributions: Vec<Attribution>,
     #[cfg(test)]
@@ -286,6 +287,7 @@ impl App {
         App {
             rows: Vec::new(),
             titles: Vec::new(),
+            notes: HashMap::new(),
             graph: None,
             attributions: Vec::new(),
             #[cfg(test)]
@@ -412,6 +414,18 @@ impl App {
     pub(crate) fn title(&self, row: &CommitRow) -> &BStr {
         debug_assert!(row.metadata_loaded, "visible rows have metadata");
         self.titles[row.title.clone()].as_bstr()
+    }
+
+    pub(crate) fn notes_loaded(&self, id: ObjectId) -> bool {
+        self.notes.contains_key(&id)
+    }
+
+    pub(crate) fn set_notes(&mut self, id: ObjectId, notes: Vec<BString>) {
+        self.notes.insert(id, notes);
+    }
+
+    pub(crate) fn notes(&self, id: ObjectId) -> &[BString] {
+        self.notes.get(&id).map(Vec::as_slice).unwrap_or_default()
     }
 
     pub(crate) fn render_lanes(&self, range: Range<usize>) -> RenderedLanes {
@@ -667,6 +681,7 @@ impl App {
         self.reload_selection = self.selected.and_then(|index| self.rows.get(index)).map(|row| row.id);
         self.rows = Vec::new();
         self.titles = Vec::new();
+        self.notes.clear();
         self.graph = None;
         self.attributions = Vec::new();
         #[cfg(test)]

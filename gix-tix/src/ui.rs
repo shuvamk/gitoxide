@@ -14,6 +14,7 @@ use crate::{
 };
 
 const COMPARED_PARENT_COLOR: Color = Color::Cyan;
+const NOTE_COLOR: Color = Color::LightBlue;
 
 pub(crate) fn draw_file_diff(frame: &mut Frame<'_>, diff: &BuiltInDiff, offset: usize, horizontal_offset: usize) {
     let [header, body, footer] =
@@ -161,6 +162,7 @@ pub(crate) fn draw(
                     show_author_name,
                     show_emails: app.show_emails,
                     show_trailers,
+                    has_notes: !app.notes(row.id).is_empty(),
                     use_mailmap: app.use_mailmap && !preview_author_copy && copy_feedback != Some(CopyKind::Author),
                     ref_mode,
                     selected: (selected == Some(start + index) && app.show_selection_tail)
@@ -343,7 +345,12 @@ pub(crate) fn draw(
     if let Some((outer, area)) = commit_pane {
         frame.render_widget(Clear, outer);
         if let Some(message) = commit_message {
-            render_commit_message(frame, area, message);
+            let notes = app
+                .selected
+                .and_then(|index| app.rows.get(index))
+                .map(|row| app.notes(row.id))
+                .unwrap_or_default();
+            render_commit_message(frame, area, message, notes);
         }
     }
 
@@ -568,24 +575,21 @@ fn change_color(kind: ChangeKind) -> Color {
     }
 }
 
-fn render_commit_message(frame: &mut Frame<'_>, area: Rect, message: &BStr) {
+fn render_commit_message(frame: &mut Frame<'_>, area: Rect, message: &BStr, notes: &[BString]) {
     let parsed = gix::objs::commit::MessageRef::from_bytes(message);
-    let Some(body) = parsed.body() else {
-        frame.render_widget(
-            Paragraph::new(commit_text(parsed.title, None)).wrap(Wrap { trim: false }),
-            area,
-        );
-        return;
-    };
     let mut body_message = BString::default();
     let mut trailers = Vec::new();
-    for block in body.message_blocks() {
-        body_message.extend_from_slice(block.message);
-        trailers.extend(block.trailers());
+    if let Some(body) = parsed.body() {
+        for block in body.message_blocks() {
+            body_message.extend_from_slice(block.message);
+            trailers.extend(block.trailers());
+        }
     }
-    if trailers.is_empty() || area.width < 3 {
+    let body_message = body_message.trim_end().as_bstr();
+    let body_message = (!body_message.is_empty()).then_some(body_message);
+    if trailers.is_empty() {
         frame.render_widget(
-            Paragraph::new(commit_text(parsed.title, parsed.body)).wrap(Wrap { trim: false }),
+            Paragraph::new(commit_text(parsed.title, parsed.body, notes)).wrap(Wrap { trim: false }),
             area,
         );
         return;
@@ -595,17 +599,32 @@ fn render_commit_message(frame: &mut Frame<'_>, area: Rect, message: &BStr) {
         .map(|trailer| Line::raw(trailer.token.to_str_lossy()).width())
         .max()
         .unwrap_or_default();
-    if key_width > area.width.saturating_sub(3) as usize {
-        frame.render_widget(
-            Paragraph::new(commit_text(parsed.title, parsed.body)).wrap(Wrap { trim: false }),
-            area,
-        );
+    if area.width < 3 || key_width > area.width.saturating_sub(3) as usize {
+        if notes.is_empty() {
+            frame.render_widget(
+                Paragraph::new(commit_text(parsed.title, parsed.body, notes)).wrap(Wrap { trim: false }),
+                area,
+            );
+            return;
+        }
+        let mut text = commit_text(parsed.title, body_message, notes);
+        text.lines.push(Line::default());
+        for trailer in trailers {
+            text.lines.extend(
+                Text::raw(format!(
+                    "{}: {}",
+                    trailer.token.to_str_lossy(),
+                    trailer.value.to_str_lossy()
+                ))
+                .lines,
+            );
+        }
+        frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), area);
         return;
     }
     let key_width = key_width as u16;
 
-    let body_message = body_message.trim_end().as_bstr();
-    let text = commit_text(parsed.title, (!body_message.is_empty()).then_some(body_message));
+    let text = commit_text(parsed.title, body_message, notes);
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
     let mut y = area
         .y
@@ -635,7 +654,7 @@ fn render_commit_message(frame: &mut Frame<'_>, area: Rect, message: &BStr) {
     }
 }
 
-fn commit_text<'a>(title: &'a BStr, body: Option<&'a BStr>) -> Text<'a> {
+fn commit_text<'a>(title: &'a BStr, body: Option<&'a BStr>, notes: &'a [BString]) -> Text<'a> {
     let mut text = Text::raw(title.to_str_lossy());
     for line in &mut text.lines {
         line.style = Style::default().add_modifier(Modifier::BOLD);
@@ -643,6 +662,18 @@ fn commit_text<'a>(title: &'a BStr, body: Option<&'a BStr>) -> Text<'a> {
     if let Some(body) = body.filter(|body| !body.is_empty()) {
         text.lines.push(Line::default());
         text.lines.extend(Text::raw(body.to_str_lossy()).lines);
+    }
+    for note in notes {
+        text.lines.push(Line::default());
+        text.lines.push(Line::from(vec![
+            Span::styled("Notes", color(NOTE_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":", color(NOTE_COLOR)),
+        ]));
+        let mut note = Text::raw(note.to_str_lossy());
+        for line in &mut note.lines {
+            line.style = color(NOTE_COLOR);
+        }
+        text.lines.extend(note.lines);
     }
     text
 }
@@ -664,6 +695,7 @@ struct MetadataOptions {
     show_author_name: bool,
     show_emails: bool,
     show_trailers: bool,
+    has_notes: bool,
     use_mailmap: bool,
     ref_mode: RefMode,
     selected: bool,
@@ -685,6 +717,7 @@ fn metadata_line<'a>(
         show_author_name,
         show_emails,
         show_trailers,
+        has_notes,
         use_mailmap,
         ref_mode,
         selected,
@@ -790,6 +823,9 @@ fn metadata_line<'a>(
                 spans.push(Span::raw(" "));
             }
         }
+    }
+    if has_notes {
+        spans.push(Span::styled("[N] ", color(NOTE_COLOR)));
     }
     if !show_emails {
         spans.push(Span::raw(title.to_str_lossy()));
@@ -1879,7 +1915,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(40, 8))?;
         let message = b"subject\n\nbody\n\nShort: one two three four five six seven\nCo-authored-by: Alice".as_bstr();
 
-        terminal.draw(|frame| render_commit_message(frame, frame.area(), message))?;
+        terminal.draw(|frame| render_commit_message(frame, frame.area(), message, &[]))?;
 
         assert_eq!(
             rendered_line(&terminal, 4).find("one"),
@@ -1920,7 +1956,7 @@ mod tests {
 
         let mut plain_terminal = Terminal::new(TestBackend::new(40, 4))?;
         plain_terminal.draw(|frame| {
-            render_commit_message(frame, frame.area(), b"plain subject\n\nplain body".as_bstr());
+            render_commit_message(frame, frame.area(), b"plain subject\n\nplain body".as_bstr(), &[]);
         })?;
         assert!(
             plain_terminal.backend().buffer()[(0, 0)]
@@ -1937,7 +1973,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(60, 8))?;
         let message = b"subject\n\nnot a trailer\nSigned-off-by: Alice\nanother note\nSigned-off-by: Bob".as_bstr();
-        terminal.draw(|frame| render_commit_message(frame, frame.area(), message))?;
+        terminal.draw(|frame| render_commit_message(frame, frame.area(), message, &[]))?;
         assert!(
             rendered_line(&terminal, 2).contains("not a trailer")
                 && rendered_line(&terminal, 3).contains("another note"),
@@ -1956,6 +1992,55 @@ mod tests {
             rendered_line(&terminal, 6).find("Bob"),
             Some(15),
             "later trailer runs share the aligned value column"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn renders_note_markers_and_notes_before_trailers() -> Result<(), Box<dyn std::error::Error>> {
+        let id = gix::ObjectId::Sha1([1; 20]);
+        let mut app = App::new(1);
+        app.extend_commits(vec![Commit {
+            id,
+            parent_ids: Default::default(),
+            committer_time: gix::date::Time::default(),
+            author: author(b"author", b"author@example.com"),
+            attributions: 0..0,
+            title: "subject".into(),
+            metadata_loaded: true,
+            signature: SignatureState::Unsigned,
+        }]);
+        app.set_notes(id, vec!["review note".into()]);
+        app.selected = None;
+        let mut history = Terminal::new(TestBackend::new(100, 2))?;
+        history.draw(|frame| draw(frame, &mut app, &Decorations::new()))?;
+        let row = rendered_row(&history);
+        let marker_x = row.find("[N]").expect("the note marker is visible") as u16;
+        assert!(row.contains("[N] subject"), "the note marker precedes the title");
+        assert_eq!(history.backend().buffer()[(marker_x, 0)].fg, NOTE_COLOR);
+
+        let mut message = Terminal::new(TestBackend::new(40, 9))?;
+        message.draw(|frame| {
+            render_commit_message(
+                frame,
+                frame.area(),
+                b"subject\n\nbody\n\nSigned-off-by: Alice".as_bstr(),
+                &["review note".into()],
+            );
+        })?;
+        assert_eq!(rendered_line(&message, 4).trim(), "Notes:");
+        assert_eq!(rendered_line(&message, 5).trim(), "review note");
+        assert!(rendered_line(&message, 7).contains("Alice"), "trailers follow notes");
+        let notes_label = &message.backend().buffer()[(0, 4)];
+        assert_eq!(notes_label.fg, NOTE_COLOR);
+        assert!(
+            notes_label.modifier.contains(Modifier::BOLD),
+            "only the Notes label is bold"
+        );
+        assert!(
+            !message.backend().buffer()[(5, 4)].modifier.contains(Modifier::BOLD)
+                && !message.backend().buffer()[(0, 5)].modifier.contains(Modifier::BOLD),
+            "the colon and note body are not bold"
         );
         Ok(())
     }
@@ -2159,6 +2244,7 @@ mod tests {
                 show_author_name: true,
                 show_emails: false,
                 show_trailers: true,
+                has_notes: false,
                 use_mailmap: false,
                 ref_mode: RefMode::All,
                 selected: false,
