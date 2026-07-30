@@ -111,11 +111,12 @@ pub(crate) fn draw(
     app.ensure_visible();
     let start = app.offset.min(app.rows.len());
     let end = start.saturating_add(app.viewport_rows).min(app.rows.len());
+    let lane_end = start.saturating_add(full_body.height as usize).min(app.rows.len());
     let visible_rows = &app.rows[start..end];
     let has_verifiable_signatures = visible_rows
         .iter()
         .any(|row| matches!(row.signature, SignatureState::Unverified | SignatureState::Verifying));
-    let lanes = app.render_lanes(start..end);
+    let lanes = app.render_lanes(start..lane_end);
     let content = Rect::new(
         body.x.saturating_add(2),
         body.y,
@@ -1719,6 +1720,69 @@ mod tests {
             "the commit status disappears when all content fits"
         );
         assert_eq!(app.commit_offset, 0, "shorter content clamps the old offset");
+        Ok(())
+    }
+
+    #[test]
+    fn changing_the_changes_height_keeps_history_alignment_stable() -> Result<(), Box<dyn std::error::Error>> {
+        let mut app = App::new(11);
+        app.extend_commits(
+            (1..=8)
+                .map(|n| Commit {
+                    id: gix::ObjectId::Sha1([n; 20]),
+                    parent_ids: Default::default(),
+                    committer_time: gix::date::Time::default(),
+                    author: author(b"author", b"author@example.com"),
+                    attributions: 0..0,
+                    title: format!("subject {n}").into(),
+                    metadata_loaded: true,
+                    signature: SignatureState::Unsigned,
+                })
+                .collect::<Vec<_>>(),
+        );
+        complete(&mut app);
+        app.set_lane(6, "●──────── ");
+        let path = crate::app::PathChange {
+            kind: ChangeKind::Modified,
+            source: None,
+            path: "path".into(),
+            lines: None,
+        };
+        let changes = |len| Changes {
+            paths: vec![path.clone(); len],
+            ..Changes::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 12))?;
+
+        terminal.draw(|frame| {
+            super::draw(
+                frame,
+                &mut app,
+                &Decorations::new(),
+                &gix::mailmap::Snapshot::default(),
+                None,
+                Some(&changes(1)),
+            );
+        })?;
+        let short = rendered_line(&terminal, 0)
+            .find("0101010")
+            .expect("metadata is visible with a short changes pane");
+
+        terminal.draw(|frame| {
+            super::draw(
+                frame,
+                &mut app,
+                &Decorations::new(),
+                &gix::mailmap::Snapshot::default(),
+                None,
+                Some(&changes(8)),
+            );
+        })?;
+        assert_eq!(
+            rendered_line(&terminal, 0).find("0101010"),
+            Some(short),
+            "changes pane height does not move aligned history metadata"
+        );
         Ok(())
     }
 
