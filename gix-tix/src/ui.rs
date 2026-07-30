@@ -15,6 +15,7 @@ use crate::{
 
 const COMPARED_PARENT_COLOR: Color = Color::Cyan;
 const NOTE_COLOR: Color = Color::LightBlue;
+const PANE_STATUS_BACKGROUND: Color = Color::DarkGray;
 
 pub(crate) fn draw_file_diff(frame: &mut Frame<'_>, diff: &BuiltInDiff, offset: usize, horizontal_offset: usize) {
     let [header, body, footer] =
@@ -307,34 +308,39 @@ pub(crate) fn draw(
         frame.render_widget(Block::new().borders(Borders::TOP), outer);
         if let Some(changes) = changes.filter(|changes| changes.is_visible()) {
             render_changes(frame, area, changes, app);
-            let status = Rect::new(
-                outer.x.saturating_add(2),
-                outer.bottom().saturating_sub(1),
-                outer.width.saturating_sub(4),
-                1,
-            );
-            let mut spans = Vec::new();
-            if let Some(parent) = changes.parent {
-                spans.extend([
-                    Span::styled(
-                        format!(
-                            "vs parent {}/{} {}",
-                            parent.index + 1,
-                            parent.total,
-                            parent.id.to_hex_with_len(7)
+            if app.changes_focused {
+                let status = Rect::new(
+                    outer.x.saturating_add(2),
+                    outer.bottom().saturating_sub(1),
+                    outer.width.saturating_sub(4),
+                    1,
+                );
+                let mut spans = Vec::new();
+                if let Some(parent) = changes.parent {
+                    spans.extend([
+                        Span::styled(
+                            format!(
+                                "vs parent {}/{} {}",
+                                parent.index + 1,
+                                parent.total,
+                                parent.id.to_hex_with_len(7)
+                            ),
+                            color(COMPARED_PARENT_COLOR),
                         ),
-                        color(COMPARED_PARENT_COLOR),
-                    ),
-                    Span::raw(" · p next parent · "),
-                ]);
+                        Span::raw(" · p next parent · "),
+                    ]);
+                }
+                if let Some(error) = &app.diff_error {
+                    spans.push(Span::styled(format!("diff: {error}"), color(Color::Red)));
+                } else {
+                    spans.push(Span::raw("↑↓/jk move · h/l pan · Enter diff"));
+                }
+                spans.push(Span::raw(" · c to hide"));
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)).style(Style::default().bg(PANE_STATUS_BACKGROUND)),
+                    status,
+                );
             }
-            if let Some(error) = &app.diff_error {
-                spans.push(Span::styled(format!("diff: {error}"), color(Color::Red)));
-            } else {
-                spans.push(Span::raw("↑↓/jk move · h/l pan · Enter diff"));
-            }
-            spans.push(Span::raw(" · c to hide"));
-            frame.render_widget(Paragraph::new(Line::from(spans)), status);
         }
         if !app.changes_focused {
             frame
@@ -357,7 +363,8 @@ pub(crate) fn draw(
         app.set_commit_bounds(area.height as usize, max_offset);
         if max_offset > 0 {
             frame.render_widget(
-                Paragraph::new("PgUp/C-b up page · PgDn/C-f down page · o to hide"),
+                Paragraph::new("PgUp/C-b up page · PgDn/C-f down page · o to hide")
+                    .style(Style::default().bg(PANE_STATUS_BACKGROUND)),
                 Rect::new(
                     outer.x.saturating_add(2),
                     outer.bottom().saturating_sub(1),
@@ -1669,6 +1676,16 @@ mod tests {
             rendered_line(&terminal, 5).contains("PgUp/C-b up page · PgDn/C-f down page"),
             "overflowing commit messages advertise both full-page key pairs"
         );
+        assert_eq!(
+            terminal.backend().buffer()[(62, 5)].bg,
+            PANE_STATUS_BACKGROUND,
+            "the commit status has the shared pane-status background"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(0, 6)].bg,
+            Color::Reset,
+            "the main status keeps its original background"
+        );
 
         app.update(Action::PageDown);
         app.update(Action::PageDown);
@@ -1843,12 +1860,13 @@ mod tests {
             "the capped pane reports paths that do not fit"
         );
         assert!(
-            rendered_line(&terminal, 14).contains("↑↓/jk move · h/l pan"),
-            "the changes status advertises its navigation keys"
+            !rendered_line(&terminal, 14).contains("↑↓/jk move · h/l pan"),
+            "the unfocused changes status is hidden"
         );
-        assert!(
-            terminal.backend().buffer()[(2, 14)].modifier.contains(Modifier::DIM),
-            "the inactive changes status is dimmed"
+        assert_eq!(
+            terminal.backend().buffer()[(2, 15)].bg,
+            Color::Reset,
+            "the main status keeps its original background"
         );
         assert!(rendered_line(&terminal, 15).contains("Tab switch"));
 
@@ -1867,6 +1885,15 @@ mod tests {
         assert!(
             !terminal.backend().buffer()[(20, 7)].modifier.contains(Modifier::DIM),
             "the focused changes border uses its normal style"
+        );
+        assert!(
+            rendered_line(&terminal, 14).contains("↑↓/jk move · h/l pan"),
+            "the focused changes status advertises its navigation keys"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(2, 14)].bg,
+            PANE_STATUS_BACKGROUND,
+            "the focused changes status uses the shared pane-status background"
         );
         assert!(
             terminal.backend().buffer()[(5, 0)].modifier.contains(Modifier::DIM)
