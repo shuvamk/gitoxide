@@ -1120,7 +1120,7 @@ fn show_builtin_diff(terminal: &mut ratatui::DefaultTerminal, diff: &BuiltInDiff
         };
         match action(key) {
             Some(Action::OpenDiff) => return Ok(false),
-            Some(Action::Quit | Action::Cancel) => return Ok(true),
+            Some(Action::ForceQuit | Action::Quit | Action::Cancel) => return Ok(true),
             Some(Action::MoveUp) => offset = offset.saturating_sub(1),
             Some(Action::MoveDown) => offset = offset.saturating_add(1).min(max),
             Some(Action::PageUp) => offset = offset.saturating_sub(page),
@@ -1279,7 +1279,7 @@ fn action(key: KeyEvent) -> Option<Action> {
         }
         KeyCode::Tab => Some(Action::ToggleChangesFocus),
         KeyCode::Enter => Some(Action::OpenDiff),
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::Quit),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::ForceQuit),
         KeyCode::Char('c') => Some(Action::ToggleChanges),
         KeyCode::Char('p') => Some(Action::CycleChangesParent),
         KeyCode::Char('q') => Some(Action::Quit),
@@ -1717,7 +1717,7 @@ mod tests {
         );
         assert_eq!(
             action(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(Action::Quit)
+            Some(Action::ForceQuit)
         );
         assert_eq!(action(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)), None);
     }

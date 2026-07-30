@@ -215,6 +215,7 @@ pub(crate) enum Action {
     Copy,
     CopyAuthor,
     PreviewAuthorCopy(bool),
+    ForceQuit,
     Quit,
 }
 
@@ -585,6 +586,7 @@ impl App {
                     return vec![Effect::VerifySignatures(ids)];
                 }
             }
+            Action::ForceQuit => return vec![Effect::Quit],
             Action::Cancel | Action::Quit if self.changes_focused => self.focus_history(),
             Action::PreviewAuthorCopy(_) if self.changes_focused => {}
             Action::PreviewAuthorCopy(value) => {
@@ -1856,7 +1858,7 @@ mod tests {
     }
 
     #[test]
-    fn q_and_escape_leave_changes_before_affecting_history() {
+    fn pane_exit_keys_return_to_history_but_control_c_quits() {
         let mut app = App::new(1);
         app.update(Action::ToggleChangesFocus);
 
@@ -1864,6 +1866,11 @@ mod tests {
         assert!(!app.changes_focused, "q returns focus to history");
 
         app.update(Action::ToggleChangesFocus);
+        assert_eq!(
+            app.update(Action::ForceQuit),
+            vec![Effect::Quit],
+            "Ctrl-C quits even while changes have focus"
+        );
         assert!(app.update(Action::Cancel).is_empty());
         assert!(!app.changes_focused, "Escape returns focus to history");
         assert_eq!(
