@@ -744,6 +744,9 @@ fn draw(
         .then_some(selected)
         .flatten()
         .filter(|id| commit_message.as_ref().map(|(cached, _)| cached) != Some(id));
+    if message_to_load.is_some() {
+        app.reset_commit_view();
+    }
     if app.show_changes && selected.is_some() && changes.as_ref().map(|(cached, _, _)| *cached) != selected {
         app.changes_parent = 0;
     }

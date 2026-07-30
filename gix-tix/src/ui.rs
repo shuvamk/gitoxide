@@ -344,13 +344,27 @@ pub(crate) fn draw(
     }
     if let Some((outer, area)) = commit_pane {
         frame.render_widget(Clear, outer);
-        if let Some(message) = commit_message {
+        let max_offset = if let Some(message) = commit_message {
             let notes = app
                 .selected
                 .and_then(|index| app.rows.get(index))
                 .map(|row| app.notes(row.id))
                 .unwrap_or_default();
-            render_commit_message(frame, area, message, notes);
+            render_commit_message(frame, area, message, notes, app.commit_offset)
+        } else {
+            0
+        };
+        app.set_commit_bounds(area.height as usize, max_offset);
+        if max_offset > 0 {
+            frame.render_widget(
+                Paragraph::new("PgUp/C-b up page · PgDn/C-f down page · o to hide"),
+                Rect::new(
+                    outer.x.saturating_add(2),
+                    outer.bottom().saturating_sub(1),
+                    outer.width.saturating_sub(4),
+                    1,
+                ),
+            );
         }
     }
 
@@ -575,7 +589,7 @@ fn change_color(kind: ChangeKind) -> Color {
     }
 }
 
-fn render_commit_message(frame: &mut Frame<'_>, area: Rect, message: &BStr, notes: &[BString]) {
+fn render_commit_message(frame: &mut Frame<'_>, area: Rect, message: &BStr, notes: &[BString], offset: usize) -> usize {
     let parsed = gix::objs::commit::MessageRef::from_bytes(message);
     let mut body_message = BString::default();
     let mut trailers = Vec::new();
@@ -588,11 +602,12 @@ fn render_commit_message(frame: &mut Frame<'_>, area: Rect, message: &BStr, note
     let body_message = body_message.trim_end().as_bstr();
     let body_message = (!body_message.is_empty()).then_some(body_message);
     if trailers.is_empty() {
-        frame.render_widget(
-            Paragraph::new(commit_text(parsed.title, parsed.body, notes)).wrap(Wrap { trim: false }),
+        return render_scrolling_paragraph(
+            frame,
             area,
+            Paragraph::new(commit_text(parsed.title, parsed.body, notes)).wrap(Wrap { trim: false }),
+            offset,
         );
-        return;
     }
     let key_width = trailers
         .iter()
@@ -601,11 +616,12 @@ fn render_commit_message(frame: &mut Frame<'_>, area: Rect, message: &BStr, note
         .unwrap_or_default();
     if area.width < 3 || key_width > area.width.saturating_sub(3) as usize {
         if notes.is_empty() {
-            frame.render_widget(
-                Paragraph::new(commit_text(parsed.title, parsed.body, notes)).wrap(Wrap { trim: false }),
+            return render_scrolling_paragraph(
+                frame,
                 area,
+                Paragraph::new(commit_text(parsed.title, parsed.body, notes)).wrap(Wrap { trim: false }),
+                offset,
             );
-            return;
         }
         let mut text = commit_text(parsed.title, body_message, notes);
         text.lines.push(Line::default());
@@ -619,39 +635,79 @@ fn render_commit_message(frame: &mut Frame<'_>, area: Rect, message: &BStr, note
                 .lines,
             );
         }
-        frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), area);
-        return;
+        return render_scrolling_paragraph(frame, area, Paragraph::new(text).wrap(Wrap { trim: false }), offset);
     }
     let key_width = key_width as u16;
 
     let text = commit_text(parsed.title, body_message, notes);
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
-    let mut y = area
-        .y
-        .saturating_add(u16::try_from(paragraph.line_count(area.width)).unwrap_or(u16::MAX))
-        .saturating_add(1);
-    frame.render_widget(paragraph, area);
-
+    let body_height = paragraph.line_count(area.width);
     let value_x = area.x.saturating_add(key_width).saturating_add(2);
     let value_width = area.right().saturating_sub(value_x);
-    for trailer in trailers {
-        if y >= area.bottom() {
+    let trailers: Vec<_> = trailers
+        .into_iter()
+        .map(|trailer| {
+            let value = Paragraph::new(trailer.value.to_str_lossy()).wrap(Wrap { trim: false });
+            let height = value.line_count(value_width).max(1);
+            (trailer, height)
+        })
+        .collect();
+    let total_height = body_height
+        .saturating_add(1)
+        .saturating_add(trailers.iter().map(|(_, height)| height).sum::<usize>());
+    let max_offset = total_height.saturating_sub(area.height as usize).min(u16::MAX as usize);
+    let offset = offset.min(max_offset);
+    frame.render_widget(paragraph.scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)), area);
+
+    let viewport_end = offset.saturating_add(area.height as usize);
+    let mut start = body_height.saturating_add(1);
+    for (trailer, height) in trailers {
+        let end = start.saturating_add(height);
+        if start >= viewport_end {
             break;
         }
-        let value = Paragraph::new(trailer.value.to_str_lossy()).wrap(Wrap { trim: false });
-        let height = u16::try_from(value.line_count(value_width))
-            .unwrap_or(u16::MAX)
-            .max(1)
-            .min(area.bottom().saturating_sub(y));
-        frame.render_widget(
-            Paragraph::new(format!("{}:", trailer.token.to_str_lossy()))
-                .style(color(Color::Green))
-                .right_aligned(),
-            Rect::new(area.x, y, key_width.saturating_add(1), 1),
-        );
-        frame.render_widget(value, Rect::new(value_x, y, value_width, height));
-        y = y.saturating_add(height);
+        if end > offset {
+            let skipped = offset.saturating_sub(start);
+            let y = area
+                .y
+                .saturating_add(u16::try_from(start.saturating_sub(offset)).unwrap_or_default());
+            let visible_height = height
+                .saturating_sub(skipped)
+                .min(area.bottom().saturating_sub(y) as usize);
+            if skipped == 0 {
+                frame.render_widget(
+                    Paragraph::new(format!("{}:", trailer.token.to_str_lossy()))
+                        .style(color(Color::Green))
+                        .right_aligned(),
+                    Rect::new(area.x, y, key_width.saturating_add(1), 1),
+                );
+            }
+            let value = Paragraph::new(trailer.value.to_str_lossy()).wrap(Wrap { trim: false });
+            frame.render_widget(
+                value.scroll((u16::try_from(skipped).unwrap_or(u16::MAX), 0)),
+                Rect::new(
+                    value_x,
+                    y,
+                    value_width,
+                    u16::try_from(visible_height).unwrap_or(u16::MAX),
+                ),
+            );
+        }
+        start = end;
     }
+    max_offset
+}
+
+fn render_scrolling_paragraph(frame: &mut Frame<'_>, area: Rect, paragraph: Paragraph<'_>, offset: usize) -> usize {
+    let max_offset = paragraph
+        .line_count(area.width)
+        .saturating_sub(area.height as usize)
+        .min(u16::MAX as usize);
+    frame.render_widget(
+        paragraph.scroll((u16::try_from(offset.min(max_offset)).unwrap_or(u16::MAX), 0)),
+        area,
+    );
+    max_offset
 }
 
 fn commit_text<'a>(title: &'a BStr, body: Option<&'a BStr>, notes: &'a [BString]) -> Text<'a> {
@@ -1582,6 +1638,74 @@ mod tests {
     }
 
     #[test]
+    fn pages_overflowing_commit_messages_and_hides_the_status_when_they_fit() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut app = App::new(4);
+        app.extend_commits(vec![Commit {
+            id: gix::ObjectId::Sha1([1; 20]),
+            parent_ids: Default::default(),
+            committer_time: gix::date::Time::default(),
+            author: author(b"author", b"author@example.com"),
+            attributions: 0..0,
+            title: "subject".into(),
+            metadata_loaded: true,
+            signature: SignatureState::Unsigned,
+        }]);
+        app.update(Action::ToggleCommit);
+        let message = b"subject\n\none\ntwo\nthree\nfour\nfive\nsix\n\nSigned-off-by: Alice".as_bstr();
+        let mut terminal = Terminal::new(TestBackend::new(120, 7))?;
+
+        terminal.draw(|frame| {
+            super::draw(
+                frame,
+                &mut app,
+                &Decorations::new(),
+                &gix::mailmap::Snapshot::default(),
+                Some(message),
+                None,
+            );
+        })?;
+        assert!(
+            rendered_line(&terminal, 5).contains("PgUp/C-b up page · PgDn/C-f down page"),
+            "overflowing commit messages advertise both full-page key pairs"
+        );
+
+        app.update(Action::PageDown);
+        app.update(Action::PageDown);
+        terminal.draw(|frame| {
+            super::draw(
+                frame,
+                &mut app,
+                &Decorations::new(),
+                &gix::mailmap::Snapshot::default(),
+                Some(message),
+                None,
+            );
+        })?;
+        assert!(
+            rendered_line(&terminal, 4).contains("Alice"),
+            "the last page reaches aligned trailers"
+        );
+
+        terminal.draw(|frame| {
+            super::draw(
+                frame,
+                &mut app,
+                &Decorations::new(),
+                &gix::mailmap::Snapshot::default(),
+                Some(b"subject".as_bstr()),
+                None,
+            );
+        })?;
+        assert!(
+            !rendered_line(&terminal, 5).contains("PgUp"),
+            "the commit status disappears when all content fits"
+        );
+        assert_eq!(app.commit_offset, 0, "shorter content clamps the old offset");
+        Ok(())
+    }
+
+    #[test]
     fn shows_changed_paths_in_a_bottom_pane_below_the_summary() -> Result<(), Box<dyn std::error::Error>> {
         let mut app = App::new(6);
         app.extend_commits(vec![
@@ -1915,7 +2039,9 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(40, 8))?;
         let message = b"subject\n\nbody\n\nShort: one two three four five six seven\nCo-authored-by: Alice".as_bstr();
 
-        terminal.draw(|frame| render_commit_message(frame, frame.area(), message, &[]))?;
+        terminal.draw(|frame| {
+            render_commit_message(frame, frame.area(), message, &[], 0);
+        })?;
 
         assert_eq!(
             rendered_line(&terminal, 4).find("one"),
@@ -1956,7 +2082,7 @@ mod tests {
 
         let mut plain_terminal = Terminal::new(TestBackend::new(40, 4))?;
         plain_terminal.draw(|frame| {
-            render_commit_message(frame, frame.area(), b"plain subject\n\nplain body".as_bstr(), &[]);
+            render_commit_message(frame, frame.area(), b"plain subject\n\nplain body".as_bstr(), &[], 0);
         })?;
         assert!(
             plain_terminal.backend().buffer()[(0, 0)]
@@ -1973,7 +2099,9 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(60, 8))?;
         let message = b"subject\n\nnot a trailer\nSigned-off-by: Alice\nanother note\nSigned-off-by: Bob".as_bstr();
-        terminal.draw(|frame| render_commit_message(frame, frame.area(), message, &[]))?;
+        terminal.draw(|frame| {
+            render_commit_message(frame, frame.area(), message, &[], 0);
+        })?;
         assert!(
             rendered_line(&terminal, 2).contains("not a trailer")
                 && rendered_line(&terminal, 3).contains("another note"),
@@ -2026,6 +2154,7 @@ mod tests {
                 frame.area(),
                 b"subject\n\nbody\n\nSigned-off-by: Alice".as_bstr(),
                 &["review note".into()],
+                0,
             );
         })?;
         assert_eq!(rendered_line(&message, 4).trim(), "Notes:");
