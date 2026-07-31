@@ -51,6 +51,130 @@ struct FillRepository<'a> {
     retain: bool,
 }
 
+type LineCounts = Option<(u32, u32)>;
+type LineDiffResult = (usize, gix::object::tree::diff::ChangeDetached, Result<LineCounts>);
+
+struct LineDiffJob {
+    index: usize,
+    change: gix::object::tree::diff::ChangeDetached,
+}
+
+struct LineDiffPool {
+    jobs: Option<mpsc::Sender<LineDiffJob>>,
+    results: mpsc::Receiver<LineDiffResult>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl LineDiffPool {
+    fn new(repository_path: &Path, parallelism: usize) -> Result<Self> {
+        let repository = gix::open(repository_path)
+            .context("could not open repository for parallel line diffs")?
+            .into_sync();
+        let mut worker_state = Vec::with_capacity(parallelism);
+        for _ in 0..parallelism {
+            let mut repository = repository.to_thread_local();
+            repository.object_cache_size(OBJECT_CACHE_SIZE);
+            let resource_cache = repository
+                .diff_resource_cache_for_tree_diff()
+                .context("could not initialize parallel line diffs")?;
+            worker_state.push((repository, resource_cache));
+        }
+
+        let (jobs, job_receiver) = mpsc::channel::<LineDiffJob>();
+        let job_receiver =
+            gix::features::threading::OwnShared::new(gix::features::threading::Mutable::new(job_receiver));
+        let (result_sender, results) = mpsc::channel();
+        let workers = worker_state
+            .into_iter()
+            .map(|(repository, mut resource_cache)| {
+                let job_receiver = gix::features::threading::OwnShared::clone(&job_receiver);
+                let result_sender = result_sender.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        let Ok(job) = gix::features::threading::lock(&job_receiver).recv() else {
+                            break;
+                        };
+                        let result = job
+                            .change
+                            .attach(&repository, &repository)
+                            .diff(&mut resource_cache)
+                            .context("could not prepare line diff")
+                            .and_then(|mut diff| {
+                                diff.line_counts()
+                                    .context("could not count changed lines")
+                                    .map(|counts| counts.map(|counts| (counts.insertions, counts.removals)))
+                            });
+                        resource_cache.clear_resource_cache_keep_allocation();
+                        if result_sender.send((job.index, job.change, result)).is_err() {
+                            break;
+                        }
+                    }
+                })
+            })
+            .collect();
+        Ok(LineDiffPool {
+            jobs: Some(jobs),
+            results,
+            workers,
+        })
+    }
+
+    fn line_counts(
+        &mut self,
+        changes: Vec<gix::object::tree::diff::ChangeDetached>,
+    ) -> Result<Vec<(gix::object::tree::diff::ChangeDetached, LineCounts)>> {
+        let len = changes.len();
+        let jobs = self.jobs.as_ref().context("line diff pool is shutting down")?;
+        for (index, change) in changes.into_iter().enumerate() {
+            jobs.send(LineDiffJob { index, change })
+                .context("line diff workers stopped unexpectedly")?;
+        }
+
+        let mut out: Vec<_> = std::iter::repeat_with(|| None).take(len).collect();
+        let mut first_error = None;
+        for _ in 0..len {
+            let (index, change, result) = self.results.recv().context("line diff workers stopped unexpectedly")?;
+            match result {
+                Ok(lines) => {
+                    *out.get_mut(index)
+                        .context("line diff worker returned an invalid result index")? = Some((change, lines));
+                }
+                Err(err) if first_error.is_none() => first_error = Some(err),
+                Err(_) => {}
+            }
+        }
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+        out.into_iter()
+            .map(|entry| entry.context("line diff worker omitted a result"))
+            .collect()
+    }
+}
+
+impl Drop for LineDiffPool {
+    fn drop(&mut self) {
+        drop(self.jobs.take());
+        for worker in self.workers.drain(..) {
+            drop(worker.join());
+        }
+    }
+}
+
+fn sync_line_diff_pool(
+    pool: &mut Option<LineDiffPool>,
+    visible: bool,
+    repository_path: &Path,
+    parallelism: usize,
+) -> Result<()> {
+    if visible && pool.is_none() {
+        *pool = Some(LineDiffPool::new(repository_path, parallelism.max(1))?);
+    } else if !visible {
+        *pool = None;
+    }
+    Ok(())
+}
+
 enum FileDiff {
     External(gix::diff::blob::platform::prepare_diff_command::Command),
     Pager { command: Command, diff: BuiltInDiff },
@@ -352,6 +476,8 @@ fn event_loop(
     let mut verification_receiver = None;
     let mut commit_message = None;
     let mut changes = None;
+    let line_diff_parallelism = std::thread::available_parallelism().map_or(1, Into::into);
+    let mut line_diff_pool = None;
     let mut fill_repository = FillRepository {
         path: &repository_path,
         retained: None,
@@ -359,6 +485,12 @@ fn event_loop(
     };
     app.inline = started_inline;
     app.has_hidden_filter = !hide.is_empty();
+    sync_line_diff_pool(
+        &mut line_diff_pool,
+        app.show_changes,
+        &repository_path,
+        line_diff_parallelism,
+    )?;
     let mut decorations = Decorations::new();
     draw(
         terminal,
@@ -370,6 +502,7 @@ fn event_loop(
         &mut notes,
         &mut commit_message,
         &mut changes,
+        &mut line_diff_pool,
     )?;
     let mut last_draw = Instant::now();
     let mut dirty = false;
@@ -418,6 +551,7 @@ fn event_loop(
                 &mut notes,
                 &mut commit_message,
                 &mut changes,
+                &mut line_diff_pool,
             )?;
             last_draw = Instant::now();
             dirty = false;
@@ -483,6 +617,7 @@ fn event_loop(
                 &mut notes,
                 &mut commit_message,
                 &mut changes,
+                &mut line_diff_pool,
             )?;
             last_draw = Instant::now();
             dirty = false;
@@ -531,7 +666,16 @@ fn event_loop(
         }
         dirty = true;
         urgent = true;
+        let toggles_changes = action == Action::ToggleChanges;
         let effects = app.update(action);
+        if toggles_changes {
+            sync_line_diff_pool(
+                &mut line_diff_pool,
+                app.show_changes,
+                &repository_path,
+                line_diff_parallelism,
+            )?;
+        }
         for effect in effects {
             match effect {
                 Effect::Cancel => cancelled.store(true, Ordering::Relaxed),
@@ -602,6 +746,7 @@ fn event_loop(
     restore.context("could not restore the inline terminal")?;
     if outcome.is_none() && started_inline {
         prepare_inline_exit(&mut app);
+        sync_line_diff_pool(&mut line_diff_pool, false, &repository_path, line_diff_parallelism)?;
         draw(
             terminal,
             &mut app,
@@ -612,6 +757,7 @@ fn event_loop(
             &mut notes,
             &mut commit_message,
             &mut changes,
+            &mut line_diff_pool,
         )?;
     }
     Ok(outcome)
@@ -710,6 +856,7 @@ fn draw(
     notes: &mut gix::note::Platform,
     commit_message: &mut Option<(gix::ObjectId, BString)>,
     changes: &mut Option<(gix::ObjectId, usize, Changes)>,
+    line_diff_pool: &mut Option<LineDiffPool>,
 ) -> Result<()> {
     app.viewport_rows = terminal
         .get_frame()
@@ -790,7 +937,14 @@ fn draw(
         }
         if let Some(id) = changes_to_load {
             repository.object_cache_size(OBJECT_CACHE_SIZE);
-            let loaded = load_changes(repository, id, app.changes_parent);
+            let loaded = load_changes(
+                repository,
+                id,
+                app.changes_parent,
+                line_diff_pool
+                    .as_mut()
+                    .context("line diff pool is missing while the changes pane is visible")?,
+            );
             repository.object_cache_size(None);
             let loaded = loaded?;
             app.changes_parent = loaded.parent.map_or(0, |parent| parent.index);
@@ -1143,7 +1297,12 @@ fn load_commit_message(repository: &gix::Repository, id: gix::ObjectId) -> Resul
     Ok(commit.message_raw_sloppy().to_owned())
 }
 
-fn load_changes(repository: &gix::Repository, id: gix::ObjectId, requested_parent: usize) -> Result<Changes> {
+fn load_changes(
+    repository: &gix::Repository,
+    id: gix::ObjectId,
+    requested_parent: usize,
+    line_diff_pool: &mut LineDiffPool,
+) -> Result<Changes> {
     let commit = repository.find_commit(id).context("could not load changed paths")?;
     let parents: Vec<_> = commit.parent_ids().collect();
     let parent_index = requested_parent.checked_rem(parents.len()).unwrap_or_default();
@@ -1164,9 +1323,6 @@ fn load_changes(repository: &gix::Repository, id: gix::ObjectId, requested_paren
     let changes = repository
         .diff_tree_to_tree(old_tree.as_ref(), Some(&new_tree), None)
         .context("could not diff commit trees")?;
-    let mut resource_cache = repository
-        .diff_resource_cache_for_tree_diff()
-        .context("could not initialize line diffs")?;
     let mut out = Changes {
         parent: (parents.len() > 1).then(|| ComparedParent {
             index: parent_index,
@@ -1175,6 +1331,7 @@ fn load_changes(repository: &gix::Repository, id: gix::ObjectId, requested_paren
         }),
         ..Changes::default()
     };
+    let mut diffs = Vec::new();
     for change in changes {
         use gix::object::tree::diff::ChangeDetached;
         let (kind, source, path, is_tree) = match &change {
@@ -1216,24 +1373,20 @@ fn load_changes(repository: &gix::Repository, id: gix::ObjectId, requested_paren
         if is_tree {
             continue;
         }
-        let lines = change
-            .attach(repository, repository)
-            .diff(&mut resource_cache)
-            .context("could not prepare line diff")?
-            .line_counts()
-            .context("could not count changed lines")?
-            .map(|counts| (counts.insertions, counts.removals));
-        if let Some((insertions, removals)) = lines {
-            out.lines_added += u64::from(insertions);
-            out.lines_removed += u64::from(removals);
-        }
-        resource_cache.clear_resource_cache_keep_allocation();
         out.paths.push(PathChange {
             kind,
             source,
             path,
-            lines,
+            lines: None,
         });
+        diffs.push(change);
+    }
+    for (path, (change, lines)) in out.paths.iter_mut().zip(line_diff_pool.line_counts(diffs)?) {
+        path.lines = lines;
+        if let Some((insertions, removals)) = lines {
+            out.lines_added += u64::from(insertions);
+            out.lines_removed += u64::from(removals);
+        }
         out.diffs.push(change);
     }
     Ok(out)
@@ -1357,8 +1510,26 @@ mod tests {
     fn loads_changes_against_each_merge_parent() -> gix_testtools::Result {
         let fixture = gix_testtools::scripted_fixture_read_only("history.sh")?;
         let repository = gix::open_opts(&fixture, gix::open::Options::isolated())?;
+        let mut line_diff_pool = None;
+        sync_line_diff_pool(&mut line_diff_pool, true, &fixture, 2)?;
+        assert_eq!(
+            line_diff_pool.as_ref().map(|pool| pool.workers.len()),
+            Some(2),
+            "showing changes creates the requested worker pool"
+        );
+        sync_line_diff_pool(&mut line_diff_pool, false, &fixture, 2)?;
+        assert!(line_diff_pool.is_none(), "hiding changes destroys the worker pool");
+        sync_line_diff_pool(&mut line_diff_pool, true, &fixture, 2)?;
+        let line_diff_pool = line_diff_pool
+            .as_mut()
+            .expect("showing changes recreates the worker pool");
 
-        let root = load_changes(&repository, repository.rev_parse_single("v1^{}")?.detach(), 0)?;
+        let root = load_changes(
+            &repository,
+            repository.rev_parse_single("v1^{}")?.detach(),
+            0,
+            line_diff_pool,
+        )?;
         assert_eq!(
             root.paths,
             [PathChange {
@@ -1428,21 +1599,34 @@ mod tests {
             );
         }
 
-        let topic = load_changes(&repository, repository.rev_parse_single("topic")?.detach(), 0)?;
+        let topic = load_changes(
+            &repository,
+            repository.rev_parse_single("topic")?.detach(),
+            0,
+            line_diff_pool,
+        )?;
         assert_eq!(
             topic.paths,
-            [PathChange {
-                kind: ChangeKind::Added,
-                source: None,
-                path: "topic".into(),
-                lines: Some((1, 0)),
-            }],
-            "single-parent changes retain diff order and status"
+            [
+                PathChange {
+                    kind: ChangeKind::Added,
+                    source: None,
+                    path: "topic".into(),
+                    lines: Some((1, 0)),
+                },
+                PathChange {
+                    kind: ChangeKind::Added,
+                    source: None,
+                    path: "topic-extra".into(),
+                    lines: Some((1, 0)),
+                }
+            ],
+            "parallel line diffs retain tree-diff order and status"
         );
-        assert_eq!((topic.lines_added, topic.lines_removed), (1, 0));
+        assert_eq!((topic.lines_added, topic.lines_removed), (2, 0));
 
         let merge = repository.rev_parse_single("main")?.detach();
-        let first_parent = load_changes(&repository, merge, 0)?;
+        let first_parent = load_changes(&repository, merge, 0, line_diff_pool)?;
         assert_eq!(
             first_parent.parent,
             Some(ComparedParent {
@@ -1462,7 +1646,7 @@ mod tests {
             "the default merge diff compares the result to its first parent"
         );
 
-        let second_parent = load_changes(&repository, merge, 1)?;
+        let second_parent = load_changes(&repository, merge, 1, line_diff_pool)?;
         assert_eq!(
             second_parent.parent,
             Some(ComparedParent {
@@ -1482,7 +1666,7 @@ mod tests {
             "later parents can be selected independently"
         );
         assert_eq!(
-            load_changes(&repository, merge, 2)?.parent,
+            load_changes(&repository, merge, 2, line_diff_pool)?.parent,
             first_parent.parent,
             "parent selection wraps around"
         );
