@@ -241,6 +241,9 @@ where
                             } else if matches!(candidate, PossibleConflict::TreeToNonTree { .. }) {
                                 let (mode, id) = theirs.entry_mode_and_id();
                                 let location = theirs.location();
+                                if needs_tree_insertion.is_some() {
+                                    their_tree.remove_change(location);
+                                }
                                 let renamed_location = unique_path_in_tree(
                                     location.as_bstr(),
                                     &editor,

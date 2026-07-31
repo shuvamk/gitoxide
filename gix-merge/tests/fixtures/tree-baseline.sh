@@ -1818,6 +1818,31 @@ git init relocated-addition-blocked-by-rename
   git commit -m "add below renamed directory"
 )
 
+git init nested-rename-blocks-relocated-addition
+(cd nested-rename-blocks-relocated-addition
+  mkdir a
+  write_lines base >a/a
+  git add .
+  git commit -m "file in a"
+
+  git branch A
+  git branch B
+
+  # Both sides rename the same file. A puts it where its containing directory
+  # used to be, while B nests it another level below that directory.
+  git checkout A
+  git mv a/a moved
+  rmdir a
+  git mv moved a
+  git commit -m "move a/a to a"
+
+  git checkout B
+  git mv a/a moved
+  mkdir -p a/a
+  git mv moved a/a/a
+  git commit -m "move a/a to a/a/a"
+)
+
 git init directory-rename-vs-directory-to-file
 (cd directory-rename-vs-directory-to-file
   mkdir a
@@ -2076,6 +2101,7 @@ baseline same-source-rewrites-after-consumed-path A-B A B "ambiguous identical b
 baseline rename-delete-after-consumed-path A-B A B "ambiguous identical blobs make gix pair rename sources differently than Git; reversing gix also changes which repeated additions are merged"
 baseline modified-file-vs-gitlink-directory A-B A B
 baseline relocated-addition-blocked-by-rename A-B A B
+baseline nested-rename-blocks-relocated-addition A-B A B
 baseline directory-rename-vs-directory-to-file A-B A B
 baseline directory-rename-vs-renamed-file-replacement A-B A B
 baseline unrelated-renames-overlapping-destinations A-B A B
@@ -2152,6 +2178,29 @@ baseline type-change-to-symlink A-B A B
   git read-tree "$merged_reversed_tree_id"
   make_resolve_tree ancestor B A
   make_resolve_tree ours B A
+)
+
+(cd nested-rename-blocks-relocated-addition
+  # gix keeps the rename/rename stages in addition to the file/directory stages
+  # that Git reports. The resulting tree and retained side content are identical.
+  blob=$(git rev-parse main:a/a)
+  rm .git/index
+  git update-index --index-info <<EOF
+100644 blob $blob 2	a
+100644 blob $blob 1	a/a
+100644 blob $blob 3	a/a/a
+100644 blob $blob 2	a~A
+EOF
+  make_conflict_index nested-rename-blocks-relocated-addition-A-B
+
+  rm .git/index
+  git update-index --index-info <<EOF
+100644 blob $blob 3	a
+100644 blob $blob 1	a/a
+100644 blob $blob 2	a/a/a
+100644 blob $blob 3	a~A
+EOF
+  make_conflict_index nested-rename-blocks-relocated-addition-A-B-reversed
 )
 
 (cd directory-rename-vs-directory-to-file
