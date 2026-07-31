@@ -14,7 +14,7 @@ use crate::{
 };
 
 const COMPARED_PARENT_COLOR: Color = Color::Cyan;
-const NOTE_COLOR: Color = Color::LightBlue;
+const NOTE_COLOR: Color = Color::LightMagenta;
 const PANE_STATUS_BACKGROUND: Color = Color::DarkGray;
 
 pub(crate) fn draw_file_diff(frame: &mut Frame<'_>, diff: &BuiltInDiff, offset: usize, horizontal_offset: usize) {
@@ -888,6 +888,9 @@ fn metadata_line<'a>(
             }
         }
     }
+    if row.has_agent_marker {
+        spans.push(Span::styled("[A] ", color(NOTE_COLOR)));
+    }
     if has_notes {
         spans.push(Span::styled("[N] ", color(NOTE_COLOR)));
     }
@@ -1055,6 +1058,7 @@ mod tests {
                 attributions: 0..7,
                 title: "subject".into(),
                 metadata_loaded: true,
+                has_agent_marker: false,
                 signature: SignatureState::Unsigned,
             }],
             attributions: vec![
@@ -1167,6 +1171,7 @@ mod tests {
             attributions: 0..0,
             title: "unique comment".into(),
             metadata_loaded: true,
+            has_agent_marker: false,
             signature: SignatureState::Unsigned,
         }]);
         app.selected = None;
@@ -1196,6 +1201,7 @@ mod tests {
                 attributions: 0..1,
                 title: "subject".into(),
                 metadata_loaded: true,
+                has_agent_marker: false,
                 signature: SignatureState::Unsigned,
             }],
             attributions: vec![Attribution {
@@ -1233,6 +1239,7 @@ mod tests {
             attributions: 0..0,
             title: "subject".into(),
             metadata_loaded: true,
+            has_agent_marker: false,
             signature: SignatureState::Unsigned,
         }]);
         complete(&mut app);
@@ -1436,6 +1443,7 @@ mod tests {
                     attributions: 0..0,
                     title: format!("subject {n}").into(),
                     metadata_loaded: true,
+                    has_agent_marker: false,
                     signature: SignatureState::Unsigned,
                 })
                 .collect::<Vec<_>>(),
@@ -1541,6 +1549,7 @@ mod tests {
             attributions: 0..0,
             title: "subject".into(),
             metadata_loaded: true,
+            has_agent_marker: false,
             signature: SignatureState::Unverified,
         }]);
         complete(&mut app);
@@ -1584,6 +1593,7 @@ mod tests {
             attributions: 0..0,
             title: "subject".into(),
             metadata_loaded: true,
+            has_agent_marker: false,
             signature: SignatureState::Unsigned,
         }]);
         let mut terminal = Terminal::new(TestBackend::new(120, 6))?;
@@ -1657,6 +1667,7 @@ mod tests {
             attributions: 0..0,
             title: "subject".into(),
             metadata_loaded: true,
+            has_agent_marker: false,
             signature: SignatureState::Unsigned,
         }]);
         app.update(Action::ToggleCommit);
@@ -1736,6 +1747,7 @@ mod tests {
                     attributions: 0..0,
                     title: format!("subject {n}").into(),
                     metadata_loaded: true,
+                    has_agent_marker: false,
                     signature: SignatureState::Unsigned,
                 })
                 .collect::<Vec<_>>(),
@@ -1800,6 +1812,7 @@ mod tests {
                 attributions: 0..0,
                 title: "merge".into(),
                 metadata_loaded: true,
+                has_agent_marker: false,
                 signature: SignatureState::Unsigned,
             },
             Commit {
@@ -1810,6 +1823,7 @@ mod tests {
                 attributions: 0..0,
                 title: "parent".into(),
                 metadata_loaded: true,
+                has_agent_marker: false,
                 signature: SignatureState::Unsigned,
             },
         ]);
@@ -2227,6 +2241,7 @@ mod tests {
             attributions: 0..0,
             title: "subject".into(),
             metadata_loaded: true,
+            has_agent_marker: true,
             signature: SignatureState::Unsigned,
         }]);
         app.set_notes(id, vec!["review note".into()]);
@@ -2234,9 +2249,14 @@ mod tests {
         let mut history = Terminal::new(TestBackend::new(100, 2))?;
         history.draw(|frame| draw(frame, &mut app, &Decorations::new()))?;
         let row = rendered_row(&history);
-        let marker_x = row.find("[N]").expect("the note marker is visible") as u16;
-        assert!(row.contains("[N] subject"), "the note marker precedes the title");
-        assert_eq!(history.backend().buffer()[(marker_x, 0)].fg, NOTE_COLOR);
+        let agent_x = row.find("[A]").expect("the agent marker is visible") as u16;
+        let note_x = row.find("[N]").expect("the note marker is visible") as u16;
+        assert!(
+            row.contains("[A] [N] subject"),
+            "agent and note markers precede the title"
+        );
+        assert_eq!(history.backend().buffer()[(agent_x, 0)].fg, Color::LightMagenta);
+        assert_eq!(history.backend().buffer()[(note_x, 0)].fg, Color::LightMagenta);
 
         let mut message = Terminal::new(TestBackend::new(40, 9))?;
         message.draw(|frame| {
@@ -2278,6 +2298,7 @@ mod tests {
                     attributions: 0..0,
                     title: format!("subject {n}").into(),
                     metadata_loaded: true,
+                    has_agent_marker: false,
                     signature: SignatureState::Unsigned,
                 })
                 .collect::<Vec<_>>(),
@@ -2343,6 +2364,7 @@ mod tests {
                     attributions: 0..0,
                     title: format!("subject {n}").into(),
                     metadata_loaded: true,
+                    has_agent_marker: false,
                     signature: SignatureState::Unsigned,
                 })
                 .collect::<Vec<_>>(),
@@ -2376,6 +2398,7 @@ mod tests {
             attributions: 0..0,
             title: format!("subject {n}").into(),
             metadata_loaded: true,
+            has_agent_marker: false,
             signature: SignatureState::Unsigned,
         };
         let mut app = App::new(4);
@@ -2421,6 +2444,7 @@ mod tests {
             attributions: 0..0,
             title: "subject".into(),
             metadata_loaded: true,
+            has_agent_marker: false,
             signature: SignatureState::Unsigned,
         };
         let decorations = Decorations::from([(
@@ -2526,6 +2550,7 @@ mod tests {
             attributions: 0..0,
             title: format!("{} subject-tail", "a".repeat(50)).into(),
             metadata_loaded: true,
+            has_agent_marker: false,
             signature: SignatureState::Unsigned,
         }]);
         complete(&mut app);

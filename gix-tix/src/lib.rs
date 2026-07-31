@@ -1500,7 +1500,7 @@ mod tests {
         let id = repository.rev_parse_single("topic")?.detach();
 
         assert!(
-            load_commit_message(&repository, id)?.starts_with(b"topic\n\nCo-authored-by:"),
+            load_commit_message(&repository, id)?.starts_with(b"topic\n\n--- agent\n\nCo-authored-by:"),
             "on-demand loading retains the full commit message"
         );
         Ok(())

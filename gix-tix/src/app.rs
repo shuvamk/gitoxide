@@ -19,6 +19,7 @@ pub(crate) struct Commit<T> {
     pub attributions: Range<usize>,
     pub title: T,
     pub metadata_loaded: bool,
+    pub has_agent_marker: bool,
     pub signature: SignatureState,
 }
 
@@ -28,6 +29,7 @@ pub(crate) struct Metadata<T> {
     pub author: &'static Author,
     pub attributions: Range<usize>,
     pub title: T,
+    pub has_agent_marker: bool,
     pub signature: SignatureState,
 }
 
@@ -365,6 +367,7 @@ impl App {
                 attributions: attribution_base + row.attributions.start..attribution_base + row.attributions.end,
                 title: start..self.titles.len(),
                 metadata_loaded: row.metadata_loaded,
+                has_agent_marker: row.has_agent_marker,
                 signature: row.signature,
             });
         }
@@ -404,6 +407,7 @@ impl App {
             author,
             attributions,
             title,
+            has_agent_marker,
             signature,
         } = metadata;
         let title_start = self.titles.len();
@@ -415,6 +419,7 @@ impl App {
         row.attributions = attribution_start + attributions.start..attribution_start + attributions.end;
         row.title = title_start..self.titles.len();
         row.metadata_loaded = true;
+        row.has_agent_marker = has_agent_marker;
         row.signature = signature;
     }
 
@@ -665,6 +670,7 @@ impl App {
                             author: row.author,
                             attributions: row.attributions.clone(),
                             title: row.title.clone(),
+                            has_agent_marker: row.has_agent_marker,
                             signature: row.signature,
                         },
                     )
@@ -681,6 +687,7 @@ impl App {
                 row.attributions = metadata.attributions.clone();
                 row.title = metadata.title.clone();
                 row.metadata_loaded = true;
+                row.has_agent_marker = metadata.has_agent_marker;
                 row.signature = metadata.signature;
             }
         }
@@ -1294,6 +1301,7 @@ mod tests {
             attributions: 0..0,
             title: format!("commit {n}").into(),
             metadata_loaded: true,
+            has_agent_marker: false,
             signature: SignatureState::Unsigned,
         }
     }
@@ -1411,6 +1419,7 @@ mod tests {
                 author: row(1).author,
                 attributions: 0..0,
                 title: "loaded".into(),
+                has_agent_marker: false,
                 signature: SignatureState::Unsigned,
             },
             Vec::new(),
