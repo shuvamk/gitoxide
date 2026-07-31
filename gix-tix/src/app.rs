@@ -257,6 +257,7 @@ pub(crate) struct App {
     pub align_metadata: bool,
     pub show_commit: bool,
     pub show_changes: bool,
+    pub(crate) changes_suppressed: bool,
     pub(crate) changes_focused: bool,
     pub(crate) changes_selected: usize,
     pub(crate) changes_offset: usize,
@@ -314,6 +315,7 @@ impl App {
             align_metadata: true,
             show_commit: false,
             show_changes: true,
+            changes_suppressed: false,
             changes_focused: false,
             changes_selected: 0,
             changes_offset: 0,
@@ -554,6 +556,7 @@ impl App {
                 self.focus_feedback = None;
                 self.show_changes = !self.show_changes;
                 if !self.show_changes {
+                    self.changes_suppressed = false;
                     self.changes_focused = false;
                     self.reset_changes_view();
                 }
@@ -716,6 +719,7 @@ impl App {
         self.lane_time = None;
         self.estimated_lane_width = 0;
         self.show_hidden = show_hidden;
+        self.changes_suppressed = false;
         self.horizontal_offset = 0;
         self.focus_history();
         self.reset_commit_view();
@@ -763,6 +767,10 @@ impl App {
     pub(crate) fn focus_history(&mut self) {
         self.changes_focused = false;
         self.focus_feedback = None;
+    }
+
+    pub(crate) fn changes_visible(&self) -> bool {
+        self.show_changes && !self.changes_suppressed
     }
 
     fn ensure_changes_visible(&mut self) {

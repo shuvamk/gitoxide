@@ -74,12 +74,12 @@ pub(crate) fn draw(
     frame.render_widget(Clear, top_spacer);
     frame.render_widget(Clear, bottom_spacer);
     let full_body = body;
-    let compared_parent = if app.show_changes {
+    let compared_parent = if app.changes_visible() {
         changes.and_then(|changes| changes.parent.map(|parent| parent.id))
     } else {
         None
     };
-    let changes_pane = app.show_changes.then(|| {
+    let changes_pane = app.changes_visible().then(|| {
         let desired_height = changes.filter(|changes| changes.is_visible()).map_or(0, |changes| {
             u16::try_from(changes.paths.len()).unwrap_or(u16::MAX).saturating_add(3)
         });
@@ -387,7 +387,7 @@ pub(crate) fn draw(
         "{} commits{status} · ↑↓/jk move · h/l pan",
         app.rows.len()
     ))];
-    if app.show_changes && changes.is_some_and(Changes::is_visible) {
+    if app.changes_visible() && changes.is_some_and(Changes::is_visible) {
         footer_spans.push(match app.focus_feedback.take() {
             Some(destination) => Span::raw(format!(" · Tab → {destination}")),
             None => Span::raw(" · Tab switch"),
@@ -1982,6 +1982,27 @@ mod tests {
             "the main status keeps its original background"
         );
         assert!(rendered_line(&terminal, 15).contains("Tab switch"));
+
+        app.changes_suppressed = true;
+        terminal.draw(|frame| {
+            super::draw(
+                frame,
+                &mut app,
+                &Decorations::new(),
+                &gix::mailmap::Snapshot::default(),
+                None,
+                Some(&changes),
+            );
+        })?;
+        assert!(
+            !rendered_line(&terminal, 8).contains("files changed"),
+            "repeated history navigation temporarily hides the changes pane"
+        );
+        assert!(
+            app.show_changes && !footer_is_dim(&terminal, "c changes"),
+            "temporary suppression leaves the persistent changes setting enabled"
+        );
+        app.changes_suppressed = false;
 
         app.update(Action::ToggleChangesFocus);
         app.update(Action::MoveDown);

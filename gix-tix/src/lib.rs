@@ -43,6 +43,7 @@ use ratatui::{TerminalOptions, Viewport, backend::CrosstermBackend, text::Line};
 const EVENT_BATCH_SIZE: usize = 256;
 const OBJECT_CACHE_SIZE: usize = 4 * 1024 * 1024;
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+const REPEAT_IDLE: Duration = Duration::from_millis(75);
 const IMMEDIATE_PAGER_EXIT: Duration = Duration::from_millis(250);
 
 struct FillRepository<'a> {
@@ -510,7 +511,14 @@ fn event_loop(
     let mut inline_terminal = None;
     let mut history_requires_alternate_screen = false;
     let mut focused = true;
+    let mut repeat_deadline: Option<Instant> = None;
     let result: Result<Option<Duration>> = (|| loop {
+        if repeat_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            app.changes_suppressed = false;
+            repeat_deadline = None;
+            dirty = true;
+            urgent = true;
+        }
         if let Some(result) = verification_receiver.as_ref().map(mpsc::Receiver::try_recv) {
             match result {
                 Ok(results) => {
@@ -622,7 +630,8 @@ fn event_loop(
             last_draw = Instant::now();
             dirty = false;
         }
-        let terminal_event = match poll_timeout(streaming, events, dirty, last_draw.elapsed()) {
+        let repeat_timeout = repeat_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let terminal_event = match poll_timeout(streaming, events, dirty, last_draw.elapsed(), repeat_timeout) {
             Some(timeout) if event::poll(timeout)? => Some(event::read()?),
             Some(_) => None,
             None => Some(event::read()?),
@@ -634,6 +643,8 @@ fn event_loop(
             TerminalEvent::Key(key) => key,
             TerminalEvent::FocusLost => {
                 focused = false;
+                app.changes_suppressed = false;
+                repeat_deadline = None;
                 drop(app.update(Action::PreviewAuthorCopy(false)));
                 dirty = true;
                 urgent = true;
@@ -654,9 +665,19 @@ fn event_loop(
             continue;
         }
         let action = action(key);
-        fill_repository.retain = retains_fill_repository(key.kind, action.as_ref(), app.changes_focused);
+        let repeats_history = retains_fill_repository(key.kind, action.as_ref(), app.changes_focused);
+        fill_repository.retain = repeats_history;
         if !fill_repository.retain {
             fill_repository.retained = None;
+        }
+        if repeats_history && app.show_changes {
+            app.changes_suppressed = true;
+            repeat_deadline = Some(Instant::now() + REPEAT_IDLE);
+        } else if key.kind != KeyEventKind::Repeat && app.changes_suppressed {
+            app.changes_suppressed = false;
+            repeat_deadline = None;
+            dirty = true;
+            urgent = true;
         }
         let Some(action) = action else {
             continue;
@@ -767,6 +788,7 @@ fn prepare_inline_exit(app: &mut App) {
     app.inline = true;
     app.show_commit = false;
     app.show_changes = false;
+    app.changes_suppressed = false;
     app.changes_focused = false;
     app.reset_changes_view();
     app.show_selection_tail = false;
@@ -883,7 +905,8 @@ fn draw(
             .collect();
         app.set_notes(id, loaded);
     }
-    let selected = (app.show_commit || app.show_changes)
+    let changes_visible = app.changes_visible();
+    let selected = (app.show_commit || changes_visible)
         .then(|| app.selected.and_then(|index| app.rows.get(index)).map(|row| row.id))
         .flatten();
     let message_to_load = app
@@ -894,10 +917,10 @@ fn draw(
     if message_to_load.is_some() {
         app.reset_commit_view();
     }
-    if app.show_changes && selected.is_some() && changes.as_ref().map(|(cached, _, _)| *cached) != selected {
+    if changes_visible && selected.is_some() && changes.as_ref().map(|(cached, _, _)| *cached) != selected {
         app.changes_parent = 0;
     }
-    let changes_to_load = app.show_changes.then_some(selected).flatten().filter(|id| {
+    let changes_to_load = changes_visible.then_some(selected).flatten().filter(|id| {
         changes
             .as_ref()
             .is_none_or(|(cached, parent, _)| cached != id || *parent != app.changes_parent)
@@ -908,7 +931,7 @@ fn draw(
     if !app.show_commit || selected.is_none() {
         *commit_message = None;
     }
-    if !app.show_changes || selected.is_none() {
+    if !app.show_changes || app.selected.is_none() {
         *changes = None;
     }
     if app.rows[start..end].iter().any(|row| !row.metadata_loaded)
@@ -1405,8 +1428,14 @@ fn should_draw(dirty: bool, streaming: bool, since_draw: Duration) -> bool {
     dirty && (!streaming || since_draw >= FRAME_INTERVAL)
 }
 
-fn poll_timeout(streaming: bool, events: usize, dirty: bool, since_draw: Duration) -> Option<Duration> {
-    streaming.then(|| {
+fn poll_timeout(
+    streaming: bool,
+    events: usize,
+    dirty: bool,
+    since_draw: Duration,
+    wake_after: Option<Duration>,
+) -> Option<Duration> {
+    let frame_timeout = streaming.then(|| {
         if events == EVENT_BATCH_SIZE {
             Duration::ZERO
         } else if dirty {
@@ -1414,7 +1443,12 @@ fn poll_timeout(streaming: bool, events: usize, dirty: bool, since_draw: Duratio
         } else {
             FRAME_INTERVAL
         }
-    })
+    });
+    match (frame_timeout, wake_after) {
+        (Some(frame), Some(wake_after)) => Some(frame.min(wake_after)),
+        (Some(frame), None) => Some(frame),
+        (None, wake_after) => wake_after,
+    }
 }
 
 fn action(key: KeyEvent) -> Option<Action> {
@@ -2007,19 +2041,29 @@ mod tests {
             "streaming frames draw at the deadline"
         );
         assert_eq!(
-            poll_timeout(false, 0, false, Duration::ZERO),
+            poll_timeout(false, 0, false, Duration::ZERO, None),
             None,
             "idle waits reactively for terminal input"
         );
         assert_eq!(
-            poll_timeout(true, EVENT_BATCH_SIZE, true, Duration::ZERO),
+            poll_timeout(true, EVENT_BATCH_SIZE, true, Duration::ZERO, None),
             Some(Duration::ZERO),
             "saturated history batches keep processing"
         );
         assert_eq!(
-            poll_timeout(true, 1, true, Duration::from_millis(10)),
+            poll_timeout(true, 1, true, Duration::from_millis(10), None),
             Some(FRAME_INTERVAL.saturating_sub(Duration::from_millis(10))),
             "dirty streaming frames wait only until their deadline"
+        );
+        assert_eq!(
+            poll_timeout(false, 0, false, Duration::ZERO, Some(REPEAT_IDLE)),
+            Some(REPEAT_IDLE),
+            "repeat-idle restoration wakes an otherwise idle event loop"
+        );
+        assert_eq!(
+            poll_timeout(true, 1, true, Duration::from_millis(10), Some(REPEAT_IDLE)),
+            Some(FRAME_INTERVAL.saturating_sub(Duration::from_millis(10))),
+            "the earlier frame deadline takes precedence over repeat-idle restoration"
         );
     }
 }
