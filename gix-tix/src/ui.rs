@@ -854,34 +854,60 @@ fn metadata_line<'a>(
             author_style,
         ));
         if show_trailers {
-            for (kind, marker) in [
-                (AttributionKind::CoAuthor, "Co: "),
-                (AttributionKind::Assisted, "As: "),
-                (AttributionKind::Reviewed, "Re: "),
-                (AttributionKind::Acked, "Ack: "),
-                (AttributionKind::Tested, "Te: "),
-                (AttributionKind::SignedOff, "So: "),
+            type Group = (&'static str, Vec<&'static str>, Vec<(String, Style)>);
+            let mut groups: Vec<Group> = Vec::new();
+            for (kind, marker, grouped_marker) in [
+                (AttributionKind::CoAuthor, "Co: ", "Co"),
+                (AttributionKind::Assisted, "As: ", "A"),
+                (AttributionKind::Reviewed, "Re: ", "Re"),
+                (AttributionKind::Acked, "Ack: ", "Ack"),
+                (AttributionKind::Tested, "Te: ", "Te"),
+                (AttributionKind::SignedOff, "So: ", "So"),
             ] {
-                let mut actors = attributions.iter().filter(|actor| actor.kind == kind).peekable();
-                if actors.peek().is_none() {
+                let actors: Vec<_> = attributions
+                    .iter()
+                    .filter(|actor| actor.kind == kind)
+                    .map(|actor| {
+                        let name = if actor.author == row.author {
+                            "*".to_owned()
+                        } else {
+                            let name =
+                                author_label(actor.author, mailmap, use_mailmap, show_emails && !actor.is_agent());
+                            if actor.is_agent() { format!("[{name}]") } else { name }
+                        };
+                        let style = if actor.author.is_github_noreply() {
+                            color(Color::Green).add_modifier(Modifier::ITALIC)
+                        } else {
+                            color(Color::Green)
+                        };
+                        (name, style)
+                    })
+                    .collect();
+                if actors.is_empty() {
                     continue;
                 }
-                spans.push(Span::styled(marker, color(Color::Green).add_modifier(Modifier::DIM)));
-                for (index, actor) in actors.enumerate() {
+                if let Some((_, markers, _)) = groups
+                    .iter_mut()
+                    .find(|(_, _, displayed_actors)| *displayed_actors == actors)
+                {
+                    markers.push(grouped_marker);
+                } else {
+                    groups.push((marker, vec![grouped_marker], actors));
+                }
+            }
+            for (marker, markers, actors) in groups {
+                spans.push(Span::styled(
+                    if markers.len() == 1 {
+                        marker.to_owned()
+                    } else {
+                        format!("{}: ", markers.join(", "))
+                    },
+                    color(Color::Green).add_modifier(Modifier::DIM),
+                ));
+                for (index, (name, style)) in actors.into_iter().enumerate() {
                     if index != 0 {
                         spans.push(Span::raw(", "));
                     }
-                    let name = if actor.author == row.author {
-                        "*".to_owned()
-                    } else {
-                        let name = author_label(actor.author, mailmap, use_mailmap, show_emails && !actor.is_agent());
-                        if actor.is_agent() { format!("[{name}]") } else { name }
-                    };
-                    let style = if actor.author.is_github_noreply() {
-                        color(Color::Green).add_modifier(Modifier::ITALIC)
-                    } else {
-                        color(Color::Green)
-                    };
                     spans.push(Span::styled(name, style));
                 }
                 spans.push(Span::raw(" "));
@@ -1055,7 +1081,7 @@ mod tests {
                 parent_ids: Default::default(),
                 committer_time: gix::date::Time::default(),
                 author: author(b"Codex", b"codex@openai.com"),
-                attributions: 0..7,
+                attributions: 0..8,
                 title: "subject".into(),
                 metadata_loaded: true,
                 has_agent_marker: false,
@@ -1064,10 +1090,14 @@ mod tests {
             attributions: vec![
                 Attribution {
                     kind: AttributionKind::CoAuthor,
-                    author: author(b"Human", b"human@example.com"),
+                    author: author(b"Claude", b"noreply@anthropic.com"),
                 },
                 Attribution {
                     kind: AttributionKind::CoAuthor,
+                    author: author(b"Codex", b"codex@openai.com"),
+                },
+                Attribution {
+                    kind: AttributionKind::Assisted,
                     author: author(b"Claude", b"noreply@anthropic.com"),
                 },
                 Attribution {
@@ -1076,7 +1106,7 @@ mod tests {
                 },
                 Attribution {
                     kind: AttributionKind::Reviewed,
-                    author: author(b"Reviewer", b"reviewer@example.com"),
+                    author: author(b"Human", b"human@example.com"),
                 },
                 Attribution {
                     kind: AttributionKind::Acked,
@@ -1101,10 +1131,8 @@ mod tests {
 
         let row = rendered_row(&terminal);
         assert!(
-            row.contains(
-                "[Codex] Co: Mapped Human, [Claude] As: * Re: Reviewer Ack: Acknowledger Te: Tester So: Signer subject"
-            ),
-            "same-kind trailers share one marker, use mailmap, and collapse the primary author to an asterisk"
+            row.contains("[Codex] Co, A: [Claude], * Re: Mapped Human Ack: Acknowledger Te: Tester So: Signer subject"),
+            "attributions with identical displayed actors share their markers"
         );
         let buffer = terminal.backend().buffer();
         let style_at = |needle: &str| {
@@ -1112,8 +1140,12 @@ mod tests {
             buffer[(x, 0)].fg
         };
         assert_eq!(style_at("[Codex]"), Color::Green, "bot authors use the agent color");
-        assert_eq!(style_at("Co:"), Color::Green, "attribution markers use the agent color");
-        let marker_x = row.find("Co:").expect("rendered metadata contains a trailer marker") as u16;
+        assert_eq!(
+            style_at("Co, A:"),
+            Color::Green,
+            "grouped attribution markers use the agent color"
+        );
+        let marker_x = row.find("Co, A:").expect("rendered metadata contains a trailer marker") as u16;
         assert!(
             buffer[(marker_x, 0)].modifier.contains(Modifier::DIM),
             "attribution markers are dimmed"
@@ -1135,19 +1167,22 @@ mod tests {
         let row = rendered_row(&terminal);
         assert!(row.contains("Codex"), "the first n keeps the primary actor");
         assert!(
-            !row.contains("Reviewer"),
+            !row.contains("Mapped Human"),
             "the first n hides trailer actors while trailers are enabled"
         );
         app.update(Action::ToggleName);
         terminal.draw(|frame| super::draw(frame, &mut app, &Decorations::new(), &mailmap, None, None))?;
         let row = rendered_row(&terminal);
         assert!(!row.contains("Codex"), "the second n hides the primary actor");
-        assert!(!row.contains("Reviewer"), "the second n keeps trailer actors hidden");
+        assert!(
+            !row.contains("Mapped Human"),
+            "the second n keeps trailer actors hidden"
+        );
         app.update(Action::ToggleName);
         app.update(Action::ToggleMailmap);
         terminal.draw(|frame| super::draw(frame, &mut app, &Decorations::new(), &mailmap, None, None))?;
         assert!(
-            rendered_row(&terminal).contains("Co: Human, [Claude]"),
+            rendered_row(&terminal).contains("Re: Human"),
             "m restores original trailer actor names"
         );
 
